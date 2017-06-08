@@ -20,7 +20,7 @@ from scipy import misc  # Reading BMPs
 import os
 import numpy
 import re
-import pkg_resources
+#import pkg_resources
 #pkg_resources.require("dxchange==0.1.2")
 import dxchange
 import time
@@ -205,6 +205,7 @@ class io(subclass):
 
         # Transpose to satisfy ASTRA dimensions:
         self._parent.data._data = numpy.transpose(self._parent.data._data, (1, 0, 2))
+        self._parent.data._data = numpy.flipud(self._parent.data._data)
         self._parent.data._data = numpy.ascontiguousarray(self._parent.data._data, dtype=numpy.float32)
 
         # Cast to float to avoid problems with divisions in the future:
@@ -302,11 +303,10 @@ class io(subclass):
 
         elif (str.lower(kind) == 'skyscan'):
             # Parse the SkyScan log file
-            self._parse_skyscan_meta()
+            self._parse_skyscan_meta(path)
 
             if (geometry['det2obj'] == 0.0):
                 geometry['det2obj'] = geometry['src2det'] - geometry['src2obj']
-                self._parse_skyscan_meta(path)
 
         elif (str.lower(kind) == 'flexray'):
             # Parse the SkyScan log file
@@ -338,11 +338,15 @@ class io(subclass):
         if not 'first_angle' in geometry.keys():
             self._parent.warning('Assuming that the first rotation angle is zero.')
             geometry['first_angle'] = 0
-
+            
         if not 'last_angle' in geometry.keys():
-            self._parent.warning('Assuming that the last rotation angle is 360 degrees')
-            geometry['last_angle'] = 2 * numpy.pi
-    
+            if (not 'rot_step' in geometry.keys()) or ('rot_step' in geometry.keys() and geometry['rot_step'] == 0.0):
+                self._parent.warning('Assuming that the last rotation angle is 360 degrees and rotation step is adjusted accordingly to the number of projections')
+                geometry['last_angle'] = 2 * numpy.pi
+                geometry['rot_step'] = (geometry['last_angle'] - geometry['first_angle']) / (geometry['nb_angle'] - 1)
+            else:
+                geometry['last_angle'] = geometry['first_angle'] + geometry['rot_step'] * (geometry['nb_angle'] - 1)
+            
         if (not 'det2obj' in geometry.keys()) or (geometry['det2obj'] == 0.0):
             geometry['det2obj'] = geometry['src2det'] - geometry['src2obj']
 
@@ -353,11 +357,9 @@ class io(subclass):
             geometry['src2det'] = geometry['det2obj'] + geometry['src2obj']
 
         if not 'det_pixel' in geometry.keys() or geometry['det_pixel'] == 0:
-            self._parent.warning('Parser didn`t find det_pixel; will use img_pixel to derive det_pixel')
+            self._parent.warning("Parser didn't find det_pixel; will use img_pixel to derive det_pixel")
             geometry['det_pixel'] = geometry['img_pixel'] * geometry['src2det'] / geometry['src2obj']
 
-        if (not 'rot_step' in geometry.keys()) or (geometry['rot_step'] == 0):
-            geometry['rot_step'] = (geometry['last_angle'] - geometry['first_angle']) / geometry['nb_angle']
 
         la = geometry['last_angle']
         fa = geometry['first_angle']
@@ -388,7 +390,7 @@ class io(subclass):
 
         #Once the file is found, parse it
         geometry = self._parent.meta.geometry
-        physics = self._parent.meta.physics
+        #physics = self._parent.meta.physics
 
         # Create a dictionary of keywords (skyscan -> our geometry definition):
         geom_dict = {'pixel pitch':'det_pixel', 'object to source':'src2obj', 'object to detector':'det2obj', 'tube voltage':'voltage', 'tube power':'power', 'tube current':'current'}
@@ -459,20 +461,20 @@ class io(subclass):
                     geometry[geom_key[0]] = float(var)*factor
 
         # Convert microns to mm:
-        geometry['img_pixel'] = geometry['img_pixel'] / 1e3
+        geometry['img_pixel'] = geometry['img_pixel'] * self._parse_unit('um')
 
         # Convert degrees to radian:
-        geometry['last_angle'] = geometry['last_angle'] / 180 * numpy.pi
-        geometry['first_angle'] = geometry['first_angle'] / 180 * numpy.pi
+        geometry['last_angle'] = geometry['last_angle'] * self._parse_unit('deg')
+        geometry['first_angle'] = geometry['first_angle'] * self._parse_unit('deg')
 
     def _parse_unit(self, string):
             # Look at the inside of trailing parenthesis
             unit = ''
             factor = 1.0
             if string[-1] == ')':
-                unit = string[string.rfind('(')+1:-1].lower()
+                unit = string[string.rfind('(')+1:-1].strip().lower()
             else:
-                return 1.0
+                unit = string.strip().lower()
 
             # Metric units --> mm
             if unit == 'mm':
@@ -521,7 +523,11 @@ class io(subclass):
                 factor = 1000.0
             elif unit == 'a':
                 factor = 1000000.0
-
+            
+            # Dimensionless units: pass
+            elif unit == 'line':
+                pass
+            
             else:
                 self._parent.warning('Unknown unit: ' + unit + '. Skipping.')
 
@@ -548,24 +554,42 @@ class io(subclass):
         #physics = self._parent.meta.physics
 
         # Create a dictionary of keywords (skyscan -> our geometry definition):
-        geom_dict = {'camera pixel size': 'det_pixel', 'image pixel size': 'img_pixel', 'object to source':'src2obj', 'camera to source':'src2det',
-        'optical axis':'optical_axis', 'rotation step':'rot_step', 'exposure':'exposure', 'source voltage':'voltage', 'source current':'current', 'camera binning':'det_binning'}
-
+        geom_dict = {'camera pixel size': 'det_pixel', 'image pixel size': 'img_pixel', 'object to source':'src2obj', 'camera to source':'src2det', 
+        'optical axis':'optical_axis', 'rotation step':'rot_step', 'exposure':'exposure', 'source voltage':'voltage', 'source current':'current',
+        'camera binning':'det_binning', 'image rotation':'det_tilt', 'number of rows':'det_rows', 'number of columns':'det_cols', 'postalignment':'det_offset', 'object bigger than fov':'object_bigger_than_fov'}
+        
         with open(log_file, 'r') as logfile:
             for line in logfile:
                 name, val = line.partition("=")[::2]
                 name = name.strip().lower()
-
+                
                 # If name contains one of the keys (names can contain other stuff like units):
                 geom_key = [geom_dict[key] for key in geom_dict.keys() if key in name]
                 
-                if geom_key != [] and geom_key[0] != 'det_binning':
+                if geom_key != [] and (geom_key[0] != 'det_binning') and (geom_key[0] != 'det_offset') and (geom_key[0] != 'large_object') :
                     factor = self._parse_unit(name)
                     geometry[geom_key[0]] = float(val)*factor
                 elif geom_key != [] and geom_key[0] == 'det_binning':
                     # Parse with the 'x' separator
                     bin_x, bin_y = val.partition("x")[::2]
                     geometry[geom_key[0]] = [float(bin_x), float(bin_y)]
+                elif geom_key != [] and geom_key[0] == 'det_offset':
+                    geometry[geom_key[0]][0] = float(val)
+                elif geom_key != [] and geom_key[0] == 'object_bigger_than_fov':
+                    if val.lower == 'off':
+                        geometry[geom_key[0]] = False
+                    else:
+                        geometry[geom_key[0]] = True
+                    
+        # Convert optical axis into detector offset (skyscan measures lines from the bottom)
+        if 'optical_axis' in geometry:
+            geometry['det_offset'][1] = geometry['optical_axis'] - geometry['det_rows']/2.0
+        
+        
+        # Convert detector tilt into radian units (degrees assumed)
+        if 'det_tilt' in geometry:
+            geometry['det_tilt'] = geometry['det_tilt'] * self._parse_unit('deg')
+            
 
     def save_tiff(self, path = '', fname='data', axis=0):
         '''
@@ -610,7 +634,7 @@ class display(subclass):
             plt.figure()
 
 
-    def slice(self, slice_num, dim_num, fig_num = [], mirror = False):
+    def slice(self, slice_num, dim_num, fig_num = [], mirror = False, upsidedown = False):
         '''
         Display a 2D slice of 3D volumel
         '''
@@ -619,8 +643,8 @@ class display(subclass):
         img = extract_2d_array(dim_num, slice_num, self._parent.data.get_data())
 
         if mirror: img = numpy.fliplr(img)
-
-        plt.imshow(img, cmap = self._cmap)
+        if upsidedown: img = numpy.flipud(img)
+        plt.imshow(img, cmap = self._cmap, origin='lower')
         plt.colorbar()
         plt.show()
 
@@ -837,11 +861,15 @@ class process(subclass):
         '''
 
         if (str.lower(kind) == 'skyscan'):
-            air_values = numpy.max(self._parent.data._data, axis = 2)
+            if ('object_bigger_than_fov' in self._parent.meta.geometry) and (self._parent.meta.geometry['object_bigger_than_fov']):
+                air_values = numpy.ones_like(self._parent.data._data[:,0,:]) * 2**16 - 1
+            else:
+                air_values = numpy.max(self._parent.data._data, axis = 2)
+                
             air_values = air_values.reshape((air_values.shape[0],air_values.shape[1],1))
             self._parent.data._data = self._parent.data._data / air_values
-
-            # add a record to the history:
+            
+            # add a record to the history: 
             self._parent.meta.history['process.flat_field'] = 1
 
             self._parent.message('Skyscan flat field correction applied.')
@@ -1145,7 +1173,7 @@ class reconstruct(subclass):
         self._initialize_astra()
 
         # Run the reconstruction:
-        epsilon = numpy.pi / 180.0 # 1 degree
+        epsilon = self._parse_unit('deg') # 1 degree
         short_scan = numpy.abs(theta[-1] - 2*numpy.pi) > epsilon
         vol = self._backproject(prnt.data._data, algorithm='FDK_CUDA', short_scan=short_scan)
 
@@ -1480,37 +1508,6 @@ class reconstruct(subclass):
         # No need to make a history record - sinogram is not changed.
 
     #----- ASTRA Utilities
-    def _geom2vec(self, proj_geom):
-
-        if not (proj_geom['type'] == 'cone'):
-            return None
-
-        elif (proj_geom['type'] == 'cone'):
-            angles = proj_geom['ProjectionAngles']
-            vectors = numpy.zeros((len(angles), 12))
-
-            # Source
-            vectors[:,0] = numpy.sin(angles) * proj_geom['DistanceOriginSource']
-            vectors[:,1] = -numpy.cos(angles) * proj_geom['DistanceOriginSource']
-            vectors[:,2] = 0
-
-            # Center of detector
-            vectors[:,3] = -numpy.sin(angles) * proj_geom['DistanceOriginDetector']
-            vectors[:,4] = numpy.cos(angles) * proj_geom['DistanceOriginDetector']
-            vectors[:,5] = 0
-
-            # Vector from detector pixel (0,0) to (0,1)
-            vectors[:,6] = numpy.cos(angles) * proj_geom['DetectorSpacingX']
-            vectors[:,7] = numpy.sin(angles) * proj_geom['DetectorSpacingX']
-            vectors[:,8] = 0
-
-            # Vector from detector pixel (0,0) to (1,0)
-            vectors[:,9] = 0
-            vectors[:,10] = 0
-            vectors[:,11] = proj_geom['DetectorSpacingY']
-
-            return astra.create_proj_geom('cone_vec', proj_geom['DetectorRowCount'], proj_geom['DetectorColCount'], vectors)
-
     def _apply_geometry_modifiers(self, vectors):
         '''
         Apply arbitrary geometrical modifiers
@@ -1526,6 +1523,8 @@ class reconstruct(subclass):
 
         #Source shift (H):
         vectors[:,0:3] += self.geom_modifier['src_tra_hrz'] * vectors[:,6:9]
+        
+        
                 
     def _initialize_astra(self, sz = None, det_pixel_size = None, 
                           det2obj = None, src2obj = None, theta = None, vec_geom = False):
@@ -1551,22 +1550,56 @@ class reconstruct(subclass):
         self.vol_geom = astra.create_vol_geom(vol_count_x, vol_count_x, vol_count_z)
         self.proj_geom = astra.create_proj_geom('cone', magnification, magnification, det_count_z, det_count_x, theta, (src2obj*magnification)/det_pixel_size, (det2obj*magnification)/det_pixel_size)
 
-        if not (self._parent.meta.geometry['det_offset'] == [0,0]):
-            # Use now vec proj geometry to gain degrees of freedom
+        if (self._parent.meta.geometry['det_offset'] != [0.0,0.0]) or (self._parent.meta.geometry['det_tilt'] != 0.0):
+            # Use now vec projection geometry to gain degrees of freedom
             self.proj_geom = astra.functions.geom_2vec(self.proj_geom)
-
-            # Shift the detector by the de-magnified amount horizontally
-            vectors = self.proj_geom['Vectors']
-            vectors[:,3:6] = vectors[:,3:6] + self._parent.meta.geometry['det_offset'][0]/magnification * vectors[:,6:9]
-    
-            # Shift the source by the de-magnified amount
-            vectors[:,0:3] = vectors[:,0:3] + self._parent.meta.geometry['det_offset'][0]/magnification * vectors[:,6:9]
             
-            # Shift the detector to vertically align the optical axis
-            vectors[:,3:6] = vectors[:,3:6] + self._parent.meta.geometry['det_offset'][1] * vectors[:,9:12]
+            ### Translations of source and detector
+            # Shift the detector by the de-magnified amount horizontally and change the reconstruction window accordingly
+            vectors = self.proj_geom['Vectors']
+            if (self._parent.meta.geometry['det_offset'] != [0.0,0.0]):
+                vectors[:,3:6] = vectors[:,3:6] - self._parent.meta.geometry['det_offset'][0]/magnification * vectors[:,6:9]
+                self.vol_geom['option']['WindowMinX'] = -self.vol_geom['GridColCount'] / 2.0 - self._parent.meta.geometry['det_offset'][0]/magnification
+                self.vol_geom['option']['WindowMaxX'] = self.vol_geom['GridColCount'] / 2.0 - self._parent.meta.geometry['det_offset'][0]/magnification
+                
+                # Shift the source by the de-magnified amount horizontally
+                vectors[:,0:3] = vectors[:,0:3] - self._parent.meta.geometry['det_offset'][0]/magnification * vectors[:,6:9]
+                
+            
+                # Shift the detector to vertically align the optical axis and change the reconstruction window accordingly
+                vectors[:,3:6] = vectors[:,3:6] - self._parent.meta.geometry['det_offset'][1] * vectors[:,9:12]
+                self.vol_geom['option']['WindowMinZ'] = -self.vol_geom['GridSliceCount'] / 2.0 - self._parent.meta.geometry['det_offset'][1]
+                self.vol_geom['option']['WindowMaxZ'] = self.vol_geom['GridSliceCount'] / 2.0 - self._parent.meta.geometry['det_offset'][1]
+            
+            ### In-plane rotation (tilt) of detector
+            if (self._parent.meta.geometry['det_tilt'] != 0.0):
+                for i in range(0,vectors.shape[0]):
+                    # Define rotation axis by normal to the detector
+                    tilt = - self._parent.meta.geometry['det_tilt']
+                    rot_axis = numpy.cross(vectors[i,6:9], vectors[i,9:12])
+                    rot_axis = rot_axis / numpy.sqrt(numpy.dot(rot_axis, rot_axis))
+                    rot_axis[2] = 0
+                    #rot_axis = rot_axis / numpy.sqrt(rot_axis[0]*rot_axis[0]+rot_axis[1]*rot_axis[1]+rot_axis[2]*rot_axis[2])
+                    # Compute rotation matrix
+                    c = numpy.cos(tilt)
+                    s = numpy.sin(tilt)
 
-            # Apply arbitrary geometrical modifiers:
-            self._apply_geometry_modifiers(vectors)
+                    rot_matrix = numpy.zeros((3,3))
+                    rot_matrix[0,0] = rot_axis[0]*rot_axis[0]*(1.0-c)+c
+                    rot_matrix[0,1] = rot_axis[0]*rot_axis[1]*(1.0-c)-rot_axis[2]*s
+                    rot_matrix[0,2] = rot_axis[0]*rot_axis[2]*(1.0-c)+rot_axis[1]*s
+                    rot_matrix[1,0] = rot_axis[1]*rot_axis[0]*(1.0-c)+rot_axis[2]*s
+                    rot_matrix[1,1] = rot_axis[1]*rot_axis[1]*(1.0-c)+c
+                    rot_matrix[1,2] = rot_axis[1]*rot_axis[2]*(1.0-c)-rot_axis[0]*s
+                    rot_matrix[2,0] = rot_axis[2]*rot_axis[0]*(1.0-c)-rot_axis[1]*s
+                    rot_matrix[2,1] = rot_axis[2]*rot_axis[1]*(1.0-c)+rot_axis[0]*s
+                    rot_matrix[2,2] = rot_axis[2]*rot_axis[2]*(1.0-c)+c
+                    
+                    #Apply rotation matrix for each detector position
+                    vectors[i,6:9] = numpy.dot(rot_matrix.T, vectors[i,6:9])
+                    vectors[i,9:12] = numpy.dot(rot_matrix, vectors[i,9:12])
+        
+            # self._apply_geometry_modifiers(vectors)
 
 
     def _initialize_ramp_filter(self, power = 1):
