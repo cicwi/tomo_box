@@ -124,7 +124,10 @@ class phantom():
         import tomopy.misc
         import tomobox
         
-        tomobox.volume(tomopy.misc.phantom.shepp3d(sz))
+        vol = tomobox.volume(tomopy.misc.phantom.shepp3d(sz))
+        vol.meta.history.add_record('SheppLogan phantom is generated', sz)
+        
+        return vol
     
 class tomography():
     '''
@@ -136,10 +139,9 @@ class tomography():
         Forward projects a volume into a tomogram
         '''
         tomo.reconstruct._initialize_astra()
-                
-        tomo.meta.history['N.B.'] = 'simulate.tomography.project is used to generate the data'
-        
-        tomo.data.set_data(tomo.reconstruct._forwardproject(volume.data._data))
+                        
+        tomo.data._data = tomo.reconstruct._forwardproject(volume.data._data)
+        tomo.meta.history.add_record('simulate.tomography.project was used to generate the data')
         
         return tomo
         
