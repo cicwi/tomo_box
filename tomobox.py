@@ -3,7 +3,7 @@
 """
 Created on Fri Feb 10 15:39:33 2017
 
-@author: kostenko
+@author: kostenko & der sarkissian
 
  ***********    Pilot for the new tomobox  *************
 
@@ -17,7 +17,6 @@ from scipy import misc  # Reading BMPs
 import os
 import numpy
 import re
-import dxchange
 import time
 import transforms3d
 from transforms3d import euler 
@@ -371,7 +370,9 @@ class data(subclass):
 #           IO class and subroutines
 # **************************************************************
 from stat import ST_CTIME
+#import os
 import gc
+import csv
 
 def sort_by_date(files):
     '''
@@ -396,30 +397,35 @@ def sort_natural(files):
 
 def read_image_stack(file):
     '''
-    Read a stack of some image files (not tiff)
+    Read a stack of some image files
     '''
     # Remove the extention and the last few letters:
-    name = os.path.basename(file)[:-8]
+    name = os.path.basename(file)
+    ext = os.path.splitext(name)[1]
+    name = os.path.splitext(name)[0]
+    digits = len(re.findall('\d+$', name)[0])
+    name_nonb = re.sub('\d+$', '', name)
     path = os.path.dirname(file)
-
-    # Get the files that contain a number:
+    
+    # Get the files of the same extension that finish by the same amount of numbers:
     files = os.listdir(path)
-    files = [x for x in files if re.findall('\d+', x[-8:])]
-
-    print('********************')
-    print(files)
+    files = [x for x in files if (re.findall('\d+$', os.path.splitext(x)[0]) and len(re.findall('\d+$', os.path.splitext(x)[0])[0]) == digits)]
 
     # Get the files that are alike and sort:
-    files = [os.path.join(path,x) for x in files if name in x]
-
+    files = [os.path.join(path,x) for x in files if ((name_nonb in x) and (os.path.splitext(x)[-1] == ext))]
+    
     #files = sorted(files)
     files = sort_natural(files)
+
+
+    print('********************')
+    #print(files)
 
     # Read the first file:
     image = misc.imread(files[0], flatten= 0)
     sz = numpy.shape(image)
-
-    data = numpy.zeros((len(files), sz[0], sz[1]), 'float32')
+    
+    data = numpy.zeros((len(files), sz[0], sz[1]), dtype = numpy.float32)
 
     # Read all files:
     ii = 0
@@ -481,7 +487,6 @@ class io(subclass):
         prnt.data._data = (numpy.zeros([det_height, theta_n, det_width]))
         prnt.meta.history.add_record('io.manual_init')
 
-    def read_raw(self, path = '', index_range = []):
         '''
         Read projection files automatically.
         This will look for files with numbers in the last 4 letters of their names.
@@ -528,14 +533,14 @@ class io(subclass):
             filename = sorted([x for x in os.listdir(path) if (filename[:-8] in x)&(filename[-3:] in x)])[0]
 
         # If it's a tiff, use dxchange to read tiff:
-        if ((filename[-4:] == 'tiff') | (filename[-3:] == 'tif')):
+        #if ((filename[-4:] == 'tiff') | (filename[-3:] == 'tif')):
 
-            print('Reading a tiff stack')
-            if self._parent:
-                self._parent.data._data = dxchange.reader.read_tiff_stack(os.path.join(path,filename), range(first, last + 1), digit=4)
-            else:
-                return dxchange.reader.read_tiff_stack(os.path.join(path,filename), range(first, last + 1))
-        else:
+        #    print('Reading a tiff stack')
+        #    if self._parent:
+        #        self._parent.data._data = dxchange.reader.read_tiff_stack(os.path.join(path,filename), range(first, last + 1), digit=4)
+        #    else:
+        #        return dxchange.reader.read_tiff_stack(os.path.join(path,filename), range(first, last + 1))
+        #else:
 
             print('Reading a stack of images')
             print('Seed file name is:', filename)
@@ -545,6 +550,16 @@ class io(subclass):
                 self._parent.data._data = (read_image_stack(os.path.join(path,filename)))
             else:
                 return read_image_stack(os.path.join(path,filename))
+
+        
+        # Trim the data with the provided inputs
+        if (index_range != []):
+            print(index_range)
+            self._parent.data._data = self._parent.data._data[index_range[0]:index_range[1], :, :]
+        if (y_range != []):
+            self._parent.data._data = self._parent.data._data[:, y_range[0]:y_range[1], :]
+        if (x_range != []):
+            self._parent.data._data = self._parent.data._data[:, :, x_range[0]:x_range[1]]
 
         # Transpose to satisfy ASTRA dimensions:
         self._parent.data._data = numpy.transpose(self._parent.data._data, (1, 0, 2))
@@ -559,10 +574,10 @@ class io(subclass):
         Read reference flat field.
 
         '''
-        if ((path_file[-4:] == 'tiff') | (path_file[-3:] == 'tif')):
-            ref = numpy.array(dxchange.reader.read_tiff(path_file))
-        else:
-            ref  = misc.imread(path_file, flatten= 0)
+        #if ((os.path.splitext(path_file)[1] == '.tiff') or (os.path.splitext(path_file)[1] == '.tif')):
+        #    ref = numpy.array(dxchange.reader.read_tiff(path_file))
+        #else:
+        ref  = misc.imread(path_file, flatten= 0)
 
         if self._parent:
             self._parent.data._ref = ref
@@ -580,9 +595,9 @@ class io(subclass):
         Read reference flat field.
 
         '''
-        if ((path_file[-4:] == 'tiff') | (path_file[-3:] == 'tif')):
+        #if ((path_file[-4:] == 'tiff') | (path_file[-3:] == 'tif')):
             dark = numpy.array(dxchange.reader.read_tiff(path_file))
-        else:
+        #else:
             dark = misc.imread(path_file, flatten= 0)
 
         if self._parent:
@@ -887,14 +902,68 @@ class io(subclass):
                 self._parent.warning('Unknown unit: ' + unit + '. Skipping.')
 
             return factor            
+        
+    
+    def read_skyscan_thermalshifts(self, path = ''):
+        path = update_path(path,self)
 
-    def save_tiff(self, path = '', fname='data', axis=0):
+        # Try to find the log file in the selected path
+        fname = [x for x in os.listdir(path) if (os.path.isfile(os.path.join(path, x)) and os.path.splitext(os.path.join(path, x))[1] == '.csv')]
+        if len(fname) == 0:
+            raise FileNotFoundError('XY shifts csv file not found in path: ' + path)
+        if len(fname) > 1:
+            #raise UserWarning('Found several log files. Currently using: ' + log_file[0])
+            self._parent.warning('Found several csv files. Currently using: ' + fname[0])
+            fname = os.path.join(path, fname[0])
+        else:
+            fname = os.path.join(path, fname[0])
+            
+        with open(fname) as csvfile:
+            reader = csv.DictReader(csvfile, fieldnames=['slice', 'x','y'])
+            for row in reader:
+                # Find the first useful row
+                if row['slice'].replace('.','',1).isdigit():
+                    break
+    
+            
+            shifts = [[float(row['x']), float(row['y'])]]
+            #[row['x'], row['y']]
+            for row in reader:
+                #self._parent.meta.geometry['thermal_shifts'].append([row['x'], row['y']])
+                shifts.append([float(row['x']), float(row['y'])])
+        
+            self._parent.meta.geometry['thermal_shifts'] = numpy.array(shifts)
+            
+            
+
+        
+        
+                if geom_key != [] and (geom_key[0] != 'det_binning') and (geom_key[0] != 'det_offset') and (geom_key[0] != 'large_object') and (geom_key[0] != 'object_bigger_than_fov'):
+                    geometry[geom_key[0]][0] = -float(val)
+                    if val.strip().lower() == 'off':
+    def save_tiff(self, path = '', fname='data', digits = 4):
         '''
         Saves the data to tiff files
         '''
-
-        path = update_path(path, self)
-        dxchange.writer.write_tiff_stack(self._parent.data.data,fname=os.path.join(path, fname), axis=axis,overwrite=True)
+        from PIL import Image
+        if self._parent.data._data is not None:
+        # First check if digit is large enough, otherwise add a digit
+            im_nb = self._parent.data._data.shape[0]
+            if digits <= numpy.log10(im_nb):
+                digits = int(numpy.log10(im_nb)) + 1
+                
+            path = update_path(path, self)
+            fname = os.path.join(path, fname)
+            
+            for i in range(0,self._parent.data._data.shape[0]):
+                fname_tmp = fname
+                fname_tmp += '_'
+                fname_tmp += str(i).zfill(digits)
+                fname_tmp += '.tiff'
+                im = Image.fromarray(self._parent.data._data[i,:,:])
+                im.save(fname_tmp)
+                #misc.imsave(name = os.path.join(path, fname_tmp), arr = self._parent.data._data[i,:,:])
+        #dxchange.writer.write_tiff_stack(self._parent.data.get_data(),fname=os.path.join(path, fname), axis=axis,overwrite=True)
 
 # **************************************************************
 #           DISPLAY class and subclasses
@@ -1137,7 +1206,8 @@ class process(subclass):
 
         if (str.lower(kind) == 'skyscan'):
             if ('object_bigger_than_fov' in self._parent.meta.geometry) and (self._parent.meta.geometry['object_bigger_than_fov']):
-                air_values = numpy.ones_like(self._parent.data._data[:,0,:]) * 2**16 - 1
+                print(self._parent.meta.geometry['object_bigger_than_fov'])
+                air_values = numpy.ones_like(self._parent.data._data[:,:,0]) * 2**16 - 1
             else:
                 air_values = numpy.max(self._parent.data._data, axis = 2)
                 
@@ -1206,7 +1276,7 @@ class process(subclass):
         self._parent.message('Short scan correction applied.')
 
 
-    def log(self, air_intensity = 1, upper_bound = numpy.log(256)):
+    def log(self, air_intensity = 1.0, lower_bound = -10, upper_bound = numpy.log(256)):
         '''
         Apply -log(x) to the sinogram
         '''
@@ -1214,14 +1284,19 @@ class process(subclass):
         #self._parent._check_double_hist('process.log(upper_bound)')
 
         # If not, apply!
-        self._parent.data._data = -numpy.log(self._parent.data._data / air_intensity)
-
+        if (air_intensity != 1.0):
+            self._parent.data._data /= air_intensity
+            
+        # In-place negative logarithm
+        numpy.log(self._parent.data._data, out = self._parent.data._data)
+        numpy.negative(self._parent.data._data, out = self._parent.data._data)
+        self._parent.data._data = numpy.float32(self._parent.data._data)
         # Apply a bound to large values:
         #self._parent.data._data[self._parent.data._data > upper_bound] = upper_bound
         #self._parent.data._data[~numpy.isfinite(self._parent.data._data)] = upper_bound
 
-        self._parent.data._data = numpy.nan_to_num(self._parent.data._data)
-        numpy.clip(self._parent.data._data, a_min = -10, a_max = upper_bound, out = self._parent.data._data)
+        #self._parent.data._data = numpy.nan_to_num(self._parent.data._data)
+        numpy.clip(self._parent.data._data, a_min = lower_bound, a_max = upper_bound, out = self._parent.data._data)
 
         self._parent.message('Logarithm is applied.')
         self._parent.meta.history.add_record('process.log(upper_bound)', upper_bound)
@@ -1348,6 +1423,7 @@ class reconstruct(subclass):
     def __init__(self, tomo = []):
         subclass.__init__(self, tomo)
         
+        self.proj_geom = None
         self.geom_modifier = {'det_tra_vrt': 0, 'det_tra_hrz':0, 'src_tra_vrt':0, 'src_tra_hrz':0} 
         
     def initialize_projection_mask(self, weight_poisson = False, weight_histogram = None, pixel_mask = None):
@@ -1653,7 +1729,7 @@ class reconstruct(subclass):
         
         return volume(numpy.transpose(x.asarray(), axes = [2, 0, 1])[:,::-1,:])    
 
-    def FDK(self):
+    def FDK(self, short_scan = None):
         '''
 
         '''
@@ -1665,8 +1741,11 @@ class reconstruct(subclass):
         # Run the reconstruction:
         #epsilon = numpy.pi / 180.0 # 1 degree - I deleted a part of code here by accident...
         theta = self._parent.meta.theta
-        short_scan = (theta.max() - theta.min()) < (numpy.pi * 1.99)
-        vol = self._backproject(prnt.data._data, algorithm='FDK_CUDA', short_scan=short_scan)
+        if short_scan is None:
+            short_scan = (theta.max() - theta.min()) < (numpy.pi * 1.99)
+        
+        print('Short scan: ' + str(short_scan))
+        vol = self._backproject(prnt.data._data, algorithm='FDK_CUDA', short_scan = short_scan)
 
         vol = volume(vol)
         #vol.history['FDK'] = 'generated in '
@@ -1803,11 +1882,28 @@ class reconstruct(subclass):
 
         M = self._parent.meta.geometry.magnification
 
-        self.vol_geom = astra.create_vol_geom(vol_count_x, vol_count_x, vol_count_z)
+        if self.vol_geom is None:
+            self.vol_geom = astra.create_vol_geom(vol_count_x, vol_count_x, vol_count_z)
         self.proj_geom = astra.create_proj_geom('cone', M, M, det_count_z, det_count_x, theta, (src2obj*M)/det_pixel[1], (det2obj*M)/det_pixel[0])
+        if self.proj_geom is None:
 
+            if (self.proj_geom['type'] == 'cone'):
         self.proj_geom = astra.functions.geom_2vec(self.proj_geom)
         vectors = self.proj_geom['Vectors']
+            
+            ### Random thermal movements
+            if ('thermal_shifts' in self._parent.meta.geometry.keys()):
+                thermal_shifts = self._parent.meta.geometry['thermal_shifts']
+                
+                # These shifts are apparent on the detector, but come from the source
+                # Fix the geometry by moving the source by delta/(magnification - 1)
+                vectors[:,0:3] = vectors[:,0:3] - numpy.reshape(thermal_shifts[:,0], (thermal_shifts.shape[0],1)) /(magnification - 1) * vectors[:,6:9]
+                vectors[:,0:3] = vectors[:,0:3] - numpy.reshape(thermal_shifts[:,1], (thermal_shifts.shape[0],1)) /(magnification - 1) * vectors[:,9:12]
+                
+
+            
+                
+            
 
         self._parent.meta.geometry._apply_modifiers(vectors)
 
@@ -1842,69 +1938,82 @@ class reconstruct(subclass):
     def _backproject(self, y, algorithm = 'FDK_CUDA', iterations=1, min_constraint = None, short_scan=False):
 
       cfg = astra.astra_dict(algorithm)
-      cfg['option'] = {'ShortScan' : short_scan}
+      cfg['option'] = {}
+      if short_scan:
+          cfg['option']['ShortScan'] = True
+      print(cfg)
       if (min_constraint is not None):
           cfg['option']['MinConstraint'] = min_constraint
-
+      
       output = numpy.zeros(astra.functions.geom_size(self.vol_geom), dtype=numpy.float32)
-      rec_id = astra.data3d.link('-vol', self.vol_geom, output)
+      rec_id = []
+      sinogram_id = []
+      alg_id = []
+      
+      try:
+          rec_id = astra.data3d.link('-vol', self.vol_geom, output)
+          sinogram_id = astra.data3d.link('-sino', self.proj_geom, y)
+    
+          cfg['ReconstructionDataId'] = rec_id
+          cfg['ProjectionDataId'] = sinogram_id
+    
+          #cfg['option'] = {}
+    
+          # Use projection and reconstruction masks:
+          if not self._reconstruction_mask is None:
+              mask_id = astra.data3d.link('-vol', self.vol_geom, self._reconstruction_mask)
+              cfg['option']['ReconstructionMaskId'] = mask_id
+    
+          if not self._projection_mask is None:
+              mask_id = astra.data3d.link('-sino', self.proj_geom, self._projection_mask)
+              cfg['option']['SinogramMaskId'] = mask_id
+    
+          # Use modified filter:
+          if not self._projection_filter is None:
+    
+              sz = self._projection_filter.shape
+    
+              slice_proj_geom = astra.create_proj_geom('parallel', 1.0, sz[1], self._parent.meta.theta)
+    
+              filt_id = astra.data2d.link('-sino', slice_proj_geom, self._projection_filter)
+              cfg['option']['FilterSinogramId'] = filt_id
+              
+          alg_id = astra.algorithm.create(cfg)
+          astra.algorithm.run(alg_id, iterations)
 
-      sinogram_id = astra.data3d.link('-sino', self.proj_geom, y)
-
-      cfg['ReconstructionDataId'] = rec_id
-      cfg['ProjectionDataId'] = sinogram_id
-
-      cfg['option'] = {}
-
-      # Use projection and reconstruction masks:
-      if not self._reconstruction_mask is None:
-          mask_id = astra.data3d.link('-vol', self.vol_geom, self._reconstruction_mask)
-          cfg['option']['ReconstructionMaskId'] = mask_id
-
-      if not self._projection_mask is None:
-          mask_id = astra.data3d.link('-sino', self.proj_geom, self._projection_mask)
-          cfg['option']['SinogramMaskId'] = mask_id
-
-      # Use modified filter:
-      if not self._projection_filter is None:
-
-          sz = self._projection_filter.shape
-
-          slice_proj_geom = astra.create_proj_geom('parallel', 1.0, sz[1], self._parent.meta.theta)
-
-          filt_id = astra.data2d.link('-sino', slice_proj_geom, self._projection_filter)
-          cfg['option']['FilterSinogramId'] = filt_id
-
-      #print(cfg['option'])
-      alg_id = astra.algorithm.create(cfg)
-
-      #astra.data3d.store(self.sinogram_id, y)
-      astra.algorithm.run(alg_id, iterations)
-
-      astra.algorithm.delete(alg_id)
-      astra.data3d.delete([rec_id, sinogram_id])
+      finally:
+          astra.algorithm.delete(alg_id)
+          astra.data3d.delete([rec_id, sinogram_id])
 
       return output #astra.data3d.get(self.rec_id)
+  
+    
 
     def _forwardproject(self, x, algorithm = 'FP3D_CUDA'):
 
       cfg = astra.astra_dict(algorithm)
-
+      
           
       output = numpy.zeros(astra.functions.geom_size(self.proj_geom), dtype=numpy.float32)
-      rec_id = astra.data3d.link('-vol', self.vol_geom, x)
-      sinogram_id = astra.data3d.link('-sino', self.proj_geom, output)
+      rec_id = []
+      sinogram_id = []
+      alg_id = []
+      
+      try:
+          rec_id = astra.data3d.link('-vol', self.vol_geom, x)
+          sinogram_id = astra.data3d.link('-sino', self.proj_geom, output)
+    
+          cfg['VolumeDataId'] = rec_id
+          cfg['ProjectionDataId'] = sinogram_id
+    
+          alg_id = astra.algorithm.create(cfg)
+    
+          #astra.data3d.store(self.rec_id, x)
+          astra.algorithm.run(alg_id, 1)
 
-      cfg['VolumeDataId'] = rec_id
-      cfg['ProjectionDataId'] = sinogram_id
-
-      alg_id = astra.algorithm.create(cfg)
-
-      #astra.data3d.store(self.rec_id, x)
-      astra.algorithm.run(alg_id, 1)
-
-      astra.data3d.delete([rec_id, sinogram_id])
-      astra.algorithm.delete(alg_id)
+      finally:
+          astra.data3d.delete([rec_id, sinogram_id])
+          astra.algorithm.delete(alg_id)
 
       return output
 
