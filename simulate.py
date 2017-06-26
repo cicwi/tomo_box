@@ -10,7 +10,7 @@ Simulate makes fake polychromatic x-ray CT data
 """
 
 #import tomopy.misc
-#import tomo_wrap as tw
+#import tomobox as tw
 #import xraydb
 
 class spectra():
@@ -122,27 +122,26 @@ class phantom():
     @staticmethod     
     def shepp3d(sz = 512):
         import tomopy.misc
-        import tomo_wrap
+        import tomobox
         
-        tomo_wrap.volume(tomopy.misc.phantom.shepp3d(sz))
+        tomobox.volume(tomopy.misc.phantom.shepp3d(sz))
     
 class tomography():
     '''
     Forward projection into the projection data space
-    '''
-    
+    '''        
     @staticmethod
-    def project(volume, sino):
+    def project(volume, tomo):
         '''
-        Forward projects a volume into a sinogram
+        Forward projects a volume into a tomogram
         '''
-        sino.reconstruct._initialize_astra()
+        tomo.reconstruct._initialize_astra()
                 
-        sino.meta.history['N.B.'] = 'faker.tomography.project is used to generate the data'
+        tomo.meta.history['N.B.'] = 'simulate.tomography.project is used to generate the data'
         
-        sino.data.set_data(sino.reconstruct._forwardproject(volume.data._data))
+        tomo.data.set_data(tomo.reconstruct._forwardproject(volume.data._data))
         
-        return sino
+        return tomo
         
     '''
 class faker():
