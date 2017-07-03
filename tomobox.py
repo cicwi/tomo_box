@@ -1358,36 +1358,22 @@ class process(subclass):
         self._parent.message('Sinogram cropped.')
 
 # **************************************************************
-#           RECONSTRUCTION class and subclasses
+#           OPTIMIZE class and subclasses
 # **************************************************************
-import astra
-from scipy import interpolate
-import math
-import odl
-
 from scipy import optimize
 from scipy.optimize import minimize_scalar
 
-class reconstruct(subclass):
+class optimize(subclass):
     '''
-    Reconstruction algorithms: FDK, SIRT, KL, FISTA etc.
+    Use various optimization schemes to better align the projection data.
     '''
-    # Some precalculated masks for ASTRA:
-    _projection_mask = None
-    _reconstruction_mask = None
-    _projection_filter = None
-    
-    # Display while computing:
-    _display_callback = False
-       
-    def __init__(self, proj = []):
-        subclass.__init__(self, proj)
+    def __init__(self, parent):
+        subclass.__init__(parent)
         
-        self.vol_geom = None
-        self.proj_geom = None
-            
     def _modifier_l2cost(self, value, modifier = 'rotation_axis'):
-               
+        '''
+        Cost function based on L2 norm of the first derivative of the volume. Computation of the first derivative is done by FDK with pre-initialized reconstruction filter.
+        '''
         # Compute an image from the shifted data:
         if modifier == 'rotation_axis':
             self._parent.meta.geometry.rotation_axis_shift(value)
@@ -1398,13 +1384,14 @@ class reconstruct(subclass):
         else:
             self._parent.error('Modifier not found!')
             
-        vol = self.FDK()
+        vol = self._parent.reconstruct.FDK()
         
         return -vol.analyse.l2_norm()
         
-    def _parabolic_min(self, values, index, space):    
+    @staticmethod     
+    def _parabolic_min(values, index, space):    
         '''
-        Use parabolic interpolation to find the minimum:
+        Use parabolic interpolation to find the extremum close to the index value:
         '''
         if (index > 0) & (index < (values.size - 1)):
             # Compute parabolae:
@@ -1423,10 +1410,10 @@ class reconstruct(subclass):
 
         return x0
             
-            
-    def _full_search(self, func, bounds, maxiter, args):
+    @staticmethod         
+    def _full_search(func, bounds, maxiter, args):
         '''
-        Performs full search of the minimum inside the given bounds.
+        Performs a full search of a minimum inside the given bounds.
         '''
         func_values = numpy.zeros(maxiter)
         
@@ -1437,18 +1424,11 @@ class reconstruct(subclass):
             func_values[ii] = func(val, modifier = args)
             ii += 1
         
-#        print('***********')
-#        print(func_values)
         min_index = func_values.argmin()    
-        print('Found minimum', space[min_index])
         
-        x0 = self._parabolic_min(func_values, min_index, space)
+        return reconstruct._parabolic_min(func_values, min_index, space)
         
-        print('Parabolic minimum', x0)
-        
-        return x0
-        
-    def optimize_geometry_modifier(self, modifier = 'det_rot', guess = 0, subscale = 8, full_search = False):
+    def optimize_geometry_modifier(self, modifier = 'rotation_axis', guess = 0, subscale = 8, full_search = False):
         '''
         Maximize the sharpness of the reconstruction by optimizing one of the geometry modifiers:
         '''
@@ -1476,7 +1456,7 @@ class reconstruct(subclass):
             
             self._parent.message('Current guess is %01f' % guess)
             
-            vol = self.FDK()
+            vol = self._parent.reconstruct.FDK()
             vol.display.slice()
             
             subscale = subscale // 2
@@ -1486,51 +1466,81 @@ class reconstruct(subclass):
         
         return guess
         
-    def optimize_rotation_center(self, guess = 0, subscale = 8, center_of_mass = True, full_search = False):
-        '''
-        Find the rotation center using a subscaling factor. 
-        Make sure that if you dont use center_of_mass or the initial guess, use subscale that is large enough.
-        '''
-        
-        if center_of_mass:
-            guess = self._parent.analyse.center_of_mass()[1] - self._parent.data.shape[2] // 2
+# **************************************************************
+#           RECONSTRUCT class and subclasses
+# **************************************************************
+import astra
+from scipy import interpolate
+import math
+import odl
 
-        self._parent.message('Searching for the center of rotation...')
-        self._parent.message('Initial guess is %01f' % guess)
+class reconstruct(object):
+    '''
+    Reconstruction algorithms: FDK, SIRT, KL, FISTA etc.
+    '''
+    # Some precalculated masks for ASTRA:
+    _projection_mask = None
+    _reconstruction_mask = None
+    _projection_filter = None
+    
+    # Display while computing:
+    _display_callback = False
+    
+    # Link to the projection data
+    _projections = []
+
+    # ASTRA geometries:
+    vol_geom = None
+    proj_geom = None
         
-        # Downscale the data:
-        while subscale >= 1:
-            
-            self._parent.message('Subscale factor %01d' % subscale)
-            
-            self._parent._data_sampling = subscale
-            
-            # Create a ramp filter so FDK will calculate a gradient:
-            self._initialize_ramp_filter(power = 2)
-                               
-            if full_search:
-                guess = self._full_search(self._modifier_l2cost, bounds = [guess / subscale - 2, guess / subscale + 2], maxiter = 5, args = 'rotation_axis') * subscale
-            else: 
-                opt = optimize.minimize(self._modifier_l2cost, x0 = guess / subscale, bounds = ((guess / subscale - 2, guess / subscale + 2),), method='COBYLA', 
-                                        options = {'maxiter': 15, 'disp': False}, args = 'rotation_axis')
-                
-            
-                guess = opt.x * subscale
-                
-            self._parent.meta.geometry.rotation_axis_shift(guess / subscale)
-                
-            self._parent.message('Current guess is %01f' % guess)
-            
-            vol = self.FDK()
-            vol.display.slice()
-            
-            subscale = subscale // 2
-            
-        self._parent._data_sampling = 1    
-        self._initialize_ramp_filter(power = 1)    
+    def __init__(self, **kwargs):                
+        self._add_projections(kwargs)
+
+    def _add_projections(self, **kwargs):
+        '''
+        Add projection data to the reconstructor.
+        '''
+        for key, value in kwargs.iteritems():
         
-        return guess
+            self._projections.append(value)
+            "%s added to reconstruct." % value
+    
+    def _total_data_shape(self):
+        '''
+        Combined length of the projection data along the angular dimension.
+        '''
+        # Shape of one projection:
+        sz = self._projections[0.data.shape
         
+        # Initialize projection data variable:            
+        total_lengh = self._projections[0].data.shape[1]
+
+        if self._projections.size > 1:
+            for proj in self._projections[1:]: total_lengh += proj.data.shape[1]
+
+        return [sz[0], total_lengh, sz[2]]
+        
+    def _total_data(self):
+        '''
+        Get the combined projection data.
+        '''
+        
+        # Return at least the data inside the first projections object:
+        data = self._projections[0].data.data
+        
+        # Check if the data is consistent:    
+        shape = data.shape
+    
+        if self._projections.size > 1:
+            for proj in self._projections[1:]:
+                if shape != proj.data.shape: proj.error('Projection data dimensions are not consistent among datasets.')
+        
+        if self._projections.size > 1:
+            for proj in self._projections[1:]:
+                data.append(proj.data, axis = 1)
+                
+        return numpy.ascontiguousarray(data)
+
     def initialize_projection_mask(self, weight_poisson = False, weight_histogram = None, pixel_mask = None):
         '''
         Genrate weights proportional to the square root of intensity that map onto the projection data
@@ -1543,19 +1553,20 @@ class reconstruct(subclass):
         pixel_mask  -  assign different weights depending on the pixel location
 
         '''
-        prnt = self._parent
-
         # Initialize ASTRA:
         self._initialize_astra()
 
         # Create a volume containing only ones for forward projection weights
-        sz = self._parent.data.shape
+        sz = self._total_data_shape()
 
-        self._projection_mask = prnt.data.data * 0
+        self._projection_mask = numpy.ones(self._total_data_shape())
 
+        # Total data:
+        data = self._total_data()
+        
         # if weight_poisson: introduce weights based on the value of intensity image:
         if not weight_poisson is None:
-            self._projection_mask = self._projection_mask * numpy.sqrt(numpy.exp(-prnt.data.data))
+            self._projection_mask = self._projection_mask * numpy.sqrt(numpy.exp(-data))
 
         # if weight_histogram is provided:
         if not weight_histogram is None:
@@ -1563,7 +1574,7 @@ class reconstruct(subclass):
             y = weight_histogram[1]
             f = interpolate.interp1d(x, y, kind = 'linear', fill_value = 'extrapolate')
 
-            self._projection_mask = self._projection_mask * f(numpy.exp(-prnt.data.data))
+            self._projection_mask = self._projection_mask * f(numpy.exp(-data))
 
         # apply pixel mask to every projection if it is provided:
         if not pixel_mask is None:
@@ -1576,27 +1587,31 @@ class reconstruct(subclass):
         '''
         Make volume mask to avoid projecting errors into the corners of the volume
         '''
-        prnt = self._parent
+        sz = self._total_data_shape()
 
-        sz = prnt.data.shape[2]
+        self._reconstruction_mask = numpy.ones(sz[0], sz[2], sz[2], dtype = 'bool')
+        
+        # Loop through all projection datasets:
+        for proj in self._projections:   
+            # compute radius of the defined cylinder
+            det_width = sz[2] / 2
+            src2obj = proj.meta.geometry.src2obj
+            total = proj.meta.geometry.src2det
+            pixel = proj.meta.geometry.det_pixel
 
-        # compute radius of the defined cylinder
-        det_width = prnt.data.shape[2] / 2
-        src2obj = prnt.meta.geometry.src2obj
-        total = prnt.meta.geometry.src2det
-        pixel = prnt.meta.geometry.det_pixel
+            # Compute the smallest radius and cut the cornenrs:
+            radius = 2 * det_width * src2obj / numpy.sqrt(total**2 + (det_width*pixel[0])**2) - 3
 
-        # Compute the smallest radius and cut the cornenrs:
-        radius = 2 * det_width * src2obj / numpy.sqrt(total**2 + (det_width*pixel[0])**2) - 3
+            # Create 2D mask:
+            yy,xx = numpy.ogrid[-sz//2:sz//2, -sz//2:sz//2]
 
-        # Create 2D mask:
-        yy,xx = numpy.ogrid[-sz//2:sz//2, -sz//2:sz//2]
+            _reconstruction_mask = numpy.array(xx**2 + yy**2 < radius**2, dtype = 'float32')
 
-        self._reconstruction_mask = numpy.array(xx**2 + yy**2 < radius**2, dtype = 'float32')
-
-        # Replicate to 3D:
-        self._reconstruction_mask = numpy.ascontiguousarray((numpy.tile(self._reconstruction_mask[None, :,:], [prnt.data.shape[0], 1, 1])))
-
+            # Replicate to 3D:           
+            self._reconstruction_mask *= (numpy.tile(self._reconstruction_mask[None, :,:], [prnt.data.shape[0], 1, 1]))
+            
+        self._reconstruction_mask = numpy.ascontiguousarray(self._reconstruction_mask)
+                                                       
         prnt.message('Reconstruction mask is initialized')
 
     def _initialize_odl(self):
