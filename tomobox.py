@@ -185,6 +185,19 @@ class geometry(subclass):
         # Center the volume around the new axis:
         self.translate_volume([0, 0, shift])
                 
+    def origin_shift(self):
+        '''
+        Compute the shift of the volume central point [x, y, z] due to offsets in the optical and rotation axes.
+        '''    
+        hrz = (self.modifiers['det_hrz'] * self.src2obj + self.modifiers['src_hrz'] * self.det2obj) / self.src2det
+        vrt = (self.modifiers['det_vrt'] * self.src2obj + self.modifiers['src_vrt'] * self.det2obj) / self.src2det
+        
+        # Take into account global shifts:
+        hrz = numpy.max([numpy.abs(hrz + self.modifiers['vol_x_tra']), hrz + numpy.abs(self.modifiers['vol_y_tra'])])
+        vrt += self.modifiers['vol_z_tra']
+        
+        return [hrz, vrt]
+    
     # Set/Get methods (very bodring part of code but, hopefully, it will make geometry look prettier from outside):       
         
     @property
@@ -221,7 +234,7 @@ class geometry(subclass):
         
     @property
     def img_pixel(self):
-        return self._det_pixel / self.magnification   
+        return [self._det_pixel[0] / self.magnification, self._det_pixel[1] / self.magnification]   
         
     @img_pixel.setter
     def img_pixel(self, img_pixel):
@@ -1101,7 +1114,7 @@ class analyse(subclass):
 #           PROCESS class and subclasses
 # **************************************************************
 from scipy import ndimage
-from tomopy.recon import rotation
+#from tomopy.recon import rotation
 import scipy.ndimage.interpolation as interp
 
 class process(subclass):
@@ -1288,7 +1301,8 @@ class process(subclass):
         '''
         Find the center of the sinogram and apply the shift to corect for the offset
         '''
-        sz = self._parent.data.shape[2] // 2
+        print('Outdated! Use a newer function!')
+        '''sz = self._parent.data.shape[2] // 2
 
         if test_path is not None:
             rotation.write_center(self._parent.data.data, theta=self._parent.meta.geometry.thetas, dpath=test_path, ind=ind, cen_range=cen_range, sinogram_order=True)
@@ -1306,6 +1320,7 @@ class process(subclass):
                     self._parent.message('Horizontal offset corrected.')
                 else:
                     self._parent.warning("Center shift found an offset smaller than 1. Correction won't be applied")
+        '''
 
 
     def bin_data(self, bin_theta = True):
@@ -1368,7 +1383,7 @@ class optimize(subclass):
     Use various optimization schemes to better align the projection data.
     '''
     def __init__(self, parent):
-        subclass.__init__(parent)
+        subclass.__init__(self, parent)
         
     def _modifier_l2cost(self, value, modifier = 'rotation_axis'):
         '''
@@ -1493,29 +1508,26 @@ class reconstruct(object):
     vol_geom = None
     proj_geom = None
         
-    def __init__(self, **kwargs):                
-        self._add_projections(kwargs)
+    def __init__(self, proj):                
+        self.add_projections(proj)
 
-    def _add_projections(self, **kwargs):
+    def add_projections(self, proj):
         '''
         Add projection data to the reconstructor.
         '''
-        for key, value in kwargs.iteritems():
+        self._projections.append(proj)
         
-            self._projections.append(value)
-            "%s added to reconstruct." % value
-    
     def _total_data_shape(self):
         '''
         Combined length of the projection data along the angular dimension.
         '''
         # Shape of one projection:
-        sz = self._projections[0.data.shape
+        sz = self._projections[0].data.shape
         
         # Initialize projection data variable:            
         total_lengh = self._projections[0].data.shape[1]
 
-        if self._projections.size > 1:
+        if numpy.size(self._projections) > 1:
             for proj in self._projections[1:]: total_lengh += proj.data.shape[1]
 
         return [sz[0], total_lengh, sz[2]]
@@ -1531,11 +1543,11 @@ class reconstruct(object):
         # Check if the data is consistent:    
         shape = data.shape
     
-        if self._projections.size > 1:
+        if numpy.size(self._projections) > 1:
             for proj in self._projections[1:]:
                 if shape != proj.data.shape: proj.error('Projection data dimensions are not consistent among datasets.')
         
-        if self._projections.size > 1:
+        if numpy.size(self._projections) > 1:
             for proj in self._projections[1:]:
                 data.append(proj.data, axis = 1)
                 
@@ -1585,7 +1597,7 @@ class reconstruct(object):
 
     def initialize_reconstruction_mask(self):
         '''
-        Make volume mask to avoid projecting errors into the corners of the volume
+        Make volume mask to avoid projecting errors into the corners of the volume that are not properly sampled.
         '''
         sz = self._total_data_shape()
 
@@ -1605,14 +1617,14 @@ class reconstruct(object):
             # Create 2D mask:
             yy,xx = numpy.ogrid[-sz//2:sz//2, -sz//2:sz//2]
 
-            _reconstruction_mask = numpy.array(xx**2 + yy**2 < radius**2, dtype = 'float32')
+            self._reconstruction_mask = numpy.array(xx**2 + yy**2 < radius**2, dtype = 'float32')
 
             # Replicate to 3D:           
-            self._reconstruction_mask *= (numpy.tile(self._reconstruction_mask[None, :,:], [prnt.data.shape[0], 1, 1]))
+            self._reconstruction_mask *= (numpy.tile(self._reconstruction_mask[None, :,:], [sz[0], 1, 1]))
             
         self._reconstruction_mask = numpy.ascontiguousarray(self._reconstruction_mask)
                                                        
-        prnt.message('Reconstruction mask is initialized')
+        self._parent.message('Reconstruction mask is initialized')
 
     def _initialize_odl(self):
         '''
@@ -1621,8 +1633,9 @@ class reconstruct(object):
         
         prnt = self._parent
 
-        sz = self._parent.data.shape
-        geom = prnt.meta.geometry
+        sz = self._total_data_shape()
+        
+        geom = self._projections[0].meta.geometry
 
         # Discrete reconstruction space: discretized functions on the rectangle.
         dim = numpy.array([sz[0], sz[2], sz[2]])
@@ -1737,188 +1750,17 @@ class reconstruct(object):
         odl.solvers.mlem(ray_trafo, x, numpy.transpose(self._parent.data.data, axes = [1, 2, 0]), 
                                 niter = iterations, callback = callback)
         
-        return volume(numpy.transpose(x.asarray(), axes = [2, 0, 1])[:,::-1,:])    
-
-    def FDK(self, short_scan = None):
-        '''
-
-        '''
-        prnt = self._parent
-
-        # Initialize ASTRA:
-        self._initialize_astra()
-
-        # Run the reconstruction:
-        #epsilon = numpy.pi / 180.0 # 1 degree - I deleted a part of code here by accident...
-        theta = self._parent.meta.geometry.thetas
-        if short_scan is None:
-            short_scan = (theta.max() - theta.min()) < (numpy.pi * 1.99)
-        
-        vol = self._backproject(prnt.data.data, algorithm='FDK_CUDA', short_scan = short_scan)
-        
-        # Reconstruction mask is applied only in native ASTRA SIRT. Apply it here:
-        if not self._reconstruction_mask is None:
-            vol = self._reconstruction_mask * vol
-        
-        vol = volume(vol)
-        #vol.history['FDK'] = 'generated in '
-        self._parent.meta.history.add_record('set data.data', [])
-        return vol
-        # No need to make a history record - sinogram is not changed.
-
-
-    def SIRT(self, iterations = 10, min_constraint = None):
-        '''
-        '''
-        prnt = self._parent
-
-        # Initialize ASTRA:
-        self._initialize_astra()
-
-        # Run the reconstruction:
-        vol = self._backproject(prnt.data.data, algorithm = 'SIRT3D_CUDA', iterations = iterations, min_constraint= min_constraint)
-
-        return volume(vol)
-        # No need to make a history record - sinogram is not changed.
-
-
-    def SIRT_CPU(self, iterations = 10, min_constraint = None):
-        '''
-
-        '''
-        prnt = self._parent
-        # Initialize ASTRA:
-        self._initialize_astra()
-
-        # Create a volume containing only ones for forward projection weights
-        sz = self._parent.data.shape
-        theta = self._parent.meta.geometry.thetas
-
-        # Initialize weights:
-        vol_ones = numpy.ones((sz[0], sz[2], sz[2]), dtype=numpy.float32)
-        vol = numpy.zeros_like(vol_ones, dtype=numpy.float32)
-        weights = self._forwardproject(vol_ones)
-        weights = 1.0 / (weights + (weights == 0))
-
-        bwd_weights = 1.0 / (theta.shape[0])
-
-        vol = numpy.zeros((sz[0], sz[2], sz[2]), dtype=numpy.float32)
-
-        for ii_iter in range(iterations):
-            fwd_proj_vols = self._forwardproject(vol)
-
-            residual = (prnt.data.data - fwd_proj_vols) * weights
-
-            if not self._projection_mask is None:
-                residual *= self._projection_mask
-
-            vol += bwd_weights * self._backproject(residual, algorithm='BP3D_CUDA')
-
-            if min_constraint != None:
-                vol[vol < min_constraint] = min_constraint
-
-
-        return volume(vol)
-        # No need to make a history record - sinogram is not changed.
-
-    def CPLS(self, iterations = 10, min_constraint = None):
-        '''
-        Chambolle-Pock Least Squares
-        '''
-        prnt = self._parent
-
-        # Initialize ASTRA:
-        self._initialize_astra()
-
-        # Create a volume containing only ones for forward projection weights
-        sz = self._parent.data.shape
-        theta = self._parent.meta.geometry.thetas
-
-        vol_ones = numpy.ones((sz[0], sz[2], sz[2]), dtype=numpy.float32)
-        vol = numpy.zeros_like(vol_ones, dtype=numpy.float32)
-        theta = self._parent.meta.geometry.thetas
-        sigma = self._forwardproject(vol_ones)
-        sigma = 1.0 / (sigma + (sigma == 0))
-        sigma_1 = 1.0  / (1.0 + sigma)
-        tau = 1.0 / theta.shape[0]
-
-        p = numpy.zeros_like(prnt.data.data)
-        ehn_sol = vol.copy()
-
-        for ii_iter in range(iterations):
-            p = (p + prnt.data.data - self._forwardproject(ehn_sol) * sigma) * sigma_1
-
-            old_vol = vol.copy()
-            vol += self._backproject(p, algorithm='BP3D_CUDA', min_constraint=min_constraint) * tau
-            vol *= (vol > 0)
-
-            ehn_sol = vol + (vol - old_vol)
-            gc.collect()
-
-        return volume(vol)
-        # No need to make a history record - sinogram is not changed.
-
-
-
-    def CGLS(self, iterations = 10, min_constraint = None):
-        '''
-        
-        '''
-        prnt = self._parent
-
-        # Initialize ASTRA:
-        self._initialize_astra()
-
-        # Run the reconstruction:
-        vol = self._backproject(prnt.data.data, algorithm = 'CGLS3D_CUDA', iterations = iterations, min_constraint=min_constraint)
-
-
-        return volume(vol)
-        # No need to make a history record - sinogram is not changed.   
-        
-        
-    def project_thetas(self, parameter_value = 0, parameter = 'axis_offset'):
-        '''
-        This routine produces a single slice with a sigle ray projected into it from each projection angle.
-        Can be used as a simple diagnostics for angle coverage.
-        '''
-        prnt = self._parent
-        sz = prnt.data.shape
-
-        # Make a synthetic sinogram:
-        sinogram = numpy.zeroes((1, sz[1], sz[2]))
-
-        # For compatibility purposes make sure that the result is 3D:
-        sinogram = numpy.ascontiguousarray(sinogram)
-
-        # Initialize ASTRA:
-        sz = numpy.array(prnt.data.shape)
-        theta = prnt.meta.geometry.thetas
-
-        # Synthetic sinogram contains values of thetas at the central pixel
-        ii = 0
-        for theta_i in theta:
-            sinogram[:, ii, sz[2]//2] = theta_i
-            ii += 1
-
-        self._initialize_astra()
-
-        # Run the reconstruction:
-        epsilon = self._parse_unit('deg') # 1 degree
-        short_scan = numpy.abs(theta[-1] - 2*numpy.pi) > epsilon
-        vol = self._backproject(prnt.data.data, algorithm='FDK_CUDA', short_scan=short_scan)
-
-        return volume(vol)
-        # No need to make a history record - sinogram is not changed.
+        return volume(numpy.transpose(x.asarray(), axes = [2, 0, 1])[:,::-1,:])   
     
-    def _apply_modifiers(self):
+    ## ******************************** ASTRA ************************************************ ##
+    
+    def _modifiers2vectors(self, proj_geom, geom):
         '''
         Apply arbitrary geometrical modifiers to the ASTRA projection geometry vector
         ''' 
-        if (self.proj_geom['type'] == 'cone'):
-            self.proj_geom = astra.functions.geom_2vec(self.proj_geom)
+        proj_geom = astra.functions.geom_2vec(proj_geom)
             
-        vectors = self.proj_geom['Vectors']
+        vectors = proj_geom['Vectors']
 
         for ii in range(0, vectors.shape[0]):
             
@@ -1931,8 +1773,6 @@ class reconstruct(object):
             #Precalculate vector perpendicular to the detector plane:
             det_normal = numpy.cross(det_axis_hrz, det_axis_vrt)
             det_normal = det_normal / numpy.sqrt(numpy.dot(det_normal, det_normal))
-            
-            geom = self._parent.meta.geometry
             
             # Translations relative to the detecotor plane:
                 
@@ -1976,37 +1816,63 @@ class reconstruct(object):
             T = numpy.array([geom.find_modifier('vol_x_tra'), geom.find_modifier('vol_y_tra'), geom.find_modifier('vol_z_tra')])    
             src_vect[:] += T             
             det_vect[:] += T 
-
+        
         # Modifiers applied... Extend the volume if needed                    
-    
+        return vectors
             
     def _initialize_astra(self, sz = None, det_pixel = None, 
                           det2obj = None, src2obj = None, theta = None, vec_geom = False):
 
-        if sz is None: sz = self._parent.data.shape
-        if det_pixel is None: det_pixel = self._parent.meta.geometry.det_pixel
-        if det2obj is None: det2obj = self._parent.meta.geometry.det2obj
-        if src2obj is None: src2obj = self._parent.meta.geometry.src2obj
-        if theta is None: theta = self._parent.meta.geometry.thetas
-
-        # Initialize ASTRA (3D):
+        # Shape of the thotal projection data:
+        if sz is None: sz = self._total_data_shape()
+        
+        # Calculate the size of the reconstruction volume based on geometry modifier values:
+        vrt_shift = 0
+        hrz_shift = 0
+        
+        for proj in self._projections:
+            hrz_shift = numpy.max([hrz_shift, proj.meta.geometry.origin_shift()[0]])
+            vrt_shift = numpy.max([vrt_shift, proj.meta.geometry.origin_shift()[1]]) 
+        
+        # Convert to pixels:
+        hrz_shift = hrz_shift / self._projections[0].meta.geometry.img_pixel[0]
+        vrt_shift = vrt_shift / self._projections[0].meta.geometry.img_pixel[1]
+        
+        # Decide on the detector and volume size:
         det_count_x = sz[2]
         det_count_z = sz[0]
-        
+    
         # Make volume count x > detector count to include corneres of the object:
-        vol_count_x = sz[2]
-        vol_count_z = sz[0]
+        vol_count_x = sz[2] + hrz_shift
+        vol_count_z = sz[0] + vrt_shift
 
-        M = self._parent.meta.geometry.magnification
-
+        # Initialize the volume geometry:
         self.vol_geom = astra.create_vol_geom(vol_count_x, vol_count_x, vol_count_z)
-            
-        self.proj_geom = astra.create_proj_geom('cone', M, M, det_count_z, det_count_x, theta, (src2obj*M)/det_pixel[1], (det2obj*M)/det_pixel[0])
         
-        self._apply_modifiers()
+        total_vectors = numpy.zeros((0,12))
+        
+        for proj in self._projections:
+            if det_pixel is None: det_pixel = proj.meta.geometry.det_pixel
+            if det2obj is None: det2obj = proj.meta.geometry.det2obj
+            if src2obj is None: src2obj = proj.meta.geometry.src2obj
+            if theta is None: theta = proj.meta.geometry.thetas
 
+            M = proj.meta.geometry.magnification
+
+            # Initialize the local projection geometry and stitch it later with other geometries:          
+            proj_geom = astra.create_proj_geom('cone', det_pixel[1], det_pixel[0], det_count_z, det_count_x, theta, (src2obj), (det2obj))
+        
+            # Convert proj_geom to vectors and apply modifiers:
+            vectors = self._modifiers2vectors(proj_geom, proj.meta.geometry)
+            
+            # Extend vectors:
+            total_vectors = numpy.append(total_vectors, vectors, axis=0) 
+            
+        # Make a new geometry based on the total vector:    
+        self.proj_geom = astra.create_proj_geom('cone_vec', det_count_z, det_count_x, total_vectors)    
+        
     def _initialize_ramp_filter(self, power = 1):
-      sz = self._parent.data.shape
+      sz = self._total_data_shape()
 
       # Next power of 2:
       order = numpy.int32(2 ** numpy.ceil(math.log2(sz[2]) - 1))
@@ -2024,15 +1890,12 @@ class reconstruct(object):
       filtImpResp = filtImpResp[:-1]
 
       filt = numpy.real(numpy.fft.fft(filtImpResp)) ** power
-      #filt = filt[0:order]
-
+      
       # Back to 32 bit...
       filt = numpy.float32(filt)
 
       self._projection_filter = numpy.matlib.repmat(filt, sz[1], 1)
-      #def _geometry_modifiers(self, sx = 0, sy = 09, sz, )
-
-
+      
     def _backproject(self, y, algorithm = 'FDK_CUDA', iterations=1, min_constraint = None, short_scan=False):
 
       cfg = astra.astra_dict(algorithm)
@@ -2099,6 +1962,10 @@ class reconstruct(object):
       alg_id = []
       
       try:
+          print('*******************')
+          print(x.shape)
+          print(self.vol_geom)
+          
           rec_id = astra.data3d.link('-vol', self.vol_geom, x)
           sinogram_id = astra.data3d.link('-sino', self.proj_geom, output)
     
@@ -2116,35 +1983,206 @@ class reconstruct(object):
 
       return output
 
-
-    def get_vol_ROI(self):
-        # Computes a mask of minimal projection ROI needed to reconstruct a ROI for FDK
+    def FDK(self, short_scan = None):
+        '''
+        FDK reconstruction based on ASTRA.
+        '''
         prnt = self._parent
 
         # Initialize ASTRA:
         self._initialize_astra()
 
         # Run the reconstruction:
-        vol = self._backproject(numpy.ones(prnt.data.shape, dtype = 'float32'))
+        #epsilon = numpy.pi / 180.0 # 1 degree - I deleted a part of code here by accident...
+        theta = self._parent.meta.geometry.thetas
+        if short_scan is None:
+            short_scan = (theta.max() - theta.min()) < (numpy.pi * 1.99)
+        
+        vol = self._backproject(self._total_data(), algorithm='FDK_CUDA', short_scan = short_scan)
+        
+        # Reconstruction mask is applied only in native ASTRA SIRT. Apply it here:
+        if not self._reconstruction_mask is None:
+            vol = self._reconstruction_mask * vol
+        
+        vol = volume(vol)
+        #vol.history['FDK'] = 'generated in '
+        self._parent.meta.history.add_record('set data.data', [])
+        return vol
+        # No need to make a history record - sinogram is not changed.
+
+
+    def SIRT(self, iterations = 10, min_constraint = None):
+        '''
+        '''
+        prnt = self._parent
+
+        # Initialize ASTRA:
+        self._initialize_astra()
+
+        # Run the reconstruction:
+        vol = self._backproject(self._total_data(), algorithm = 'SIRT3D_CUDA', iterations = iterations, min_constraint= min_constraint)
+
+        return volume(vol)
+        # No need to make a history record - sinogram is not changed.
+
+
+    def SIRT_CPU(self, iterations = 10, min_constraint = None):
+        '''
+
+        '''
+        # Initialize ASTRA:
+        self._initialize_astra()
+
+        # Create a volume containing only ones for forward projection weights
+        sz = self._total_data_shape()
+        
+        # Initialize weights:
+        vol_ones = numpy.ones((sz[0], sz[2], sz[2]), dtype=numpy.float32)
+        vol = numpy.zeros_like(vol_ones, dtype=numpy.float32)
+        
+        weights = self._forwardproject(vol_ones)
+        weights = 1.0 / (weights + (weights == 0))
+
+        bwd_weights = 1.0 / sz[1]
+
+        vol = numpy.zeros((sz[0], sz[2], sz[2]), dtype=numpy.float32)
+
+        for ii_iter in range(iterations):
+            fwd_proj_vols = self._forwardproject(vol)
+
+            residual = (prnt.data.data - fwd_proj_vols) * weights
+
+            if not self._projection_mask is None:
+                residual *= self._projection_mask
+
+            vol += bwd_weights * self._backproject(residual, algorithm='BP3D_CUDA')
+
+            if min_constraint != None:
+                vol[vol < min_constraint] = min_constraint
+
+        return volume(vol)
+        # No need to make a history record - sinogram is not changed.
+
+    def CPLS(self, iterations = 10, min_constraint = None):
+        '''
+        Chambolle-Pock Least Squares
+        '''
+        prnt = self._parent
+
+        # Initialize ASTRA:
+        self._initialize_astra()
+
+        # Create a volume containing only ones for forward projection weights
+        sz = self._total_data_shape()
+
+        vol_ones = numpy.ones((sz[0], sz[2], sz[2]), dtype=numpy.float32)
+        vol = numpy.zeros_like(vol_ones, dtype=numpy.float32)
+        
+        sigma = self._forwardproject(vol_ones)
+        sigma = 1.0 / (sigma + (sigma == 0))
+        sigma_1 = 1.0  / (1.0 + sigma)
+        tau = 1.0 / sz[1]
+
+        p = numpy.zeros_like(prnt.data.data)
+        ehn_sol = vol.copy()
+
+        data = self._total_data()
+        
+        for ii_iter in range(iterations):
+            p = (p + data - self._forwardproject(ehn_sol) * sigma) * sigma_1
+
+            old_vol = vol.copy()
+            vol += self._backproject(p, algorithm='BP3D_CUDA', min_constraint=min_constraint) * tau
+            vol *= (vol > 0)
+
+            ehn_sol = vol + (vol - old_vol)
+            gc.collect()
+
+        return volume(vol)
+        # No need to make a history record - sinogram is not changed.
+
+
+
+    def CGLS(self, iterations = 10, min_constraint = None):
+        '''
+        
+        '''
+        prnt = self._parent
+
+        # Initialize ASTRA:
+        self._initialize_astra()
+
+        # Run the reconstruction:
+        vol = self._backproject(self._total_data(), algorithm = 'CGLS3D_CUDA', iterations = iterations, min_constraint=min_constraint)
+
+        return volume(vol)
+        # No need to make a history record - sinogram is not changed.   
+        
+        
+    def project_thetas(self, parameter_value = 0, parameter = 'axis_offset'):
+        '''
+        This routine produces a single slice with a sigle ray projected into it from each projection angle.
+        Can be used as a simple diagnostics for angle coverage.
+        '''
+        pass
+        '''
+        sz = self._total_data_shape()
+
+        # Make a synthetic sinogram:
+        sinogram = numpy.zeroes((1, sz[1], sz[2]))
+
+        # For compatibility purposes make sure that the result is 3D:
+        sinogram = numpy.ascontiguousarray(sinogram)
+
+        # Initialize ASTRA:
+        theta = prnt.meta.geometry.thetas
+
+        # Synthetic sinogram contains values of thetas at the central pixel
+        ii = 0
+        for theta_i in theta:
+            sinogram[:, ii, sz[2]//2] = theta_i
+            ii += 1
+
+        self._initialize_astra()
+
+        # Run the reconstruction:
+        epsilon = self._parse_unit('deg') # 1 degree
+        short_scan = numpy.abs(theta[-1] - 2*numpy.pi) > epsilon
+        vol = self._backproject(prnt.data.data, algorithm='FDK_CUDA', short_scan=short_scan)
+
+        return volume(vol)
+        # No need to make a history record - sinogram is not changed.
+        '''
+
+    def get_vol_ROI(self):
+        '''
+        Computes a mask of minimal projection ROI needed to reconstruct a ROI for FDK
+        '''
+        
+        # Initialize ASTRA:
+        self._initialize_astra()
+
+        # Run the reconstruction:
+        vol = self._backproject(numpy.ones(self._total_data_shape(), dtype = 'float32'))
 
         return volume(vol)
 
     def get_proj_ROI(self, rows=[0,512], cols=[0,512], algorithm='FP3D_CUDA'):
-        # Computes a mask of minimal projection ROI needed to reconstruct a ROI for FDK
-        prnt = self._parent
-
+        '''
+        Computes a mask of minimal projection ROI needed to reconstruct a ROI for FDK
+        '''
+        
         # Initialize ASTRA:
-        sz = prnt.data.shape
+        sz = self._total_data_shape()
+        
         pixel_size = prnt.meta.geometry.det_pixel
         det2obj = prnt.meta.geometry.det2obj
         src2obj = prnt.meta.geometry.src2obj
         theta = prnt.meta.geometry.thetas
 
-
         roi = numpy.zeros((sz[0],sz[2], sz[2]), dtype=numpy.float32)
         roi[rows[0]:rows[1],cols[0]:cols[1],cols[0]:cols[1]] = 1.0
         self._initialize_astra(sz, pixel_size, det2obj, src2obj, theta)
-
 
         mask = self._forwardproject(roi, algorithm=algorithm)
 
@@ -2277,6 +2315,7 @@ class projections(object):
         self.display = display(self)
         self.analyse = analyse(self)
         self.process = process(self)
+        self.optimize = optimize(self)
         self.reconstruct = reconstruct(self)
         self.data = data(self)
         

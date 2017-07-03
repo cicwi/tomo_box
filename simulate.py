@@ -13,6 +13,10 @@ Simulate makes fake polychromatic x-ray CT data
 #import tomobox as tw
 #import xraydb
 
+import tomobox
+import numpy
+import odl
+
 class spectra():
     '''
     Simulates spectral phenomena that involve x-ray-matter interaction
@@ -121,11 +125,17 @@ class phantom():
     
     @staticmethod     
     def shepp3d(sz = 512):
-        import tomopy.misc
-        import tomobox
+        #import tomopy.misc
         
-        vol = tomobox.volume(tomopy.misc.phantom.shepp3d(sz))
-        vol.meta.history.add_record('SheppLogan phantom is generated', sz)
+        dim = numpy.array([sz, sz, sz])
+        space = odl.uniform_discr(min_pt = -dim / 2, max_pt = dim / 2, shape=dim, dtype='float32')
+
+        x = odl.phantom.transmission.shepp_logan(space)
+        
+        vol = tomobox.volume(numpy.transpose(x.asarray(), axes = [2, 0, 1])[:,::-1,:])
+        
+        #vol = tomobox.volume(tomopy.misc.phantom.shepp3d(sz))
+        vol.meta.history.add_record('SheppLogan phantom is generated using ODL shepp_logan()', sz)
         
         return vol
     
@@ -140,23 +150,9 @@ class tomography():
         '''
         tomo.reconstruct._initialize_astra()
                         
-        tomo.data._data = tomo.reconstruct._forwardproject(volume.data._data)
+        tomo.data._data = tomo.reconstruct._forwardproject(numpy.ascontiguousarray(volume.data._data))
         tomo.meta.history.add_record('simulate.tomography.project was used to generate the data')
         
         return tomo
         
-    '''
-class faker():
-    '''
-    '''
-    phantom = []
-    spectra = []
-    tomography = []
-
-    
-    def __init__(self):
-        self.phantom = tomopy.misc.phantom
-        self.spectra = spectra()
-        self.tomography = tomography()
-    '''
-
+   
