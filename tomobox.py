@@ -23,8 +23,8 @@ from transforms3d import euler
     
 #import pkg_resources
 #pkg_resources.require("dxchange==0.1.2")
-#from mayavi import mlab
-#from tvtk.util.ctf import ColorTransferFunction
+from mayavi import mlab
+from tvtk.util.ctf import ColorTransferFunction
 
 # **************************************************************
 #           Parent class for all sinogram subclasses:
@@ -92,7 +92,7 @@ class history():
 # **************************************************************
 #           Geometry class
 # **************************************************************
-class geometry():
+class geometry(subclass):
     '''
     For now, this class describes circular motion cone beam geometry.
     It contains standard global parameters such as source to detector distance and magnification
@@ -113,7 +113,9 @@ class geometry():
     VRT, HRZ and MAG are vertical, horizontal and prependicular directions relative to the original detector orientation     
     '''
         
-    def __init__(self):
+    def __init__(self, parent):
+        subclass.__init__(self, parent)
+        
         self.modifiers = {'det_vrt': 0, 'det_hrz': 0, 'det_mag': 0, 'src_vrt': 0, 'src_hrz': 0, 'src_mag': 0, 'det_rot': 0, 'dtheta':0, 'vol_x_tra': 0, 'vol_y_tra':0, 'vol_z_tra':0, 'vol_x_rot':0, 'vol_y_rot':0, 'vol_z_rot':0}    
 
     def initialize(self, src2obj, det2obj, det_pixel, theta_range, theta_n):
@@ -236,27 +238,31 @@ class geometry():
         
     @property
     def thetas(self):
-        return self._thetas
+        dt = 1#self._parent._data_sampling
+        
+        return numpy.array(self._thetas[::dt])
         
     @thetas.setter
     def thetas(self, thetas):
-        self._thetas = numpy.array(thetas)
+        dt = self._parent._data_sampling
+        
+        self._thetas[::dt] = numpy.array(thetas)
     
     @property
     def theta_n(self):
-        return self._thetas.size    
+        return self.thetas.size    
         
     @property
     def theta_range(self):
-        return (self._thetas[0], self._thetas[-1])
+        return (self.thetas[0], self.thetas[-1])
      
     @theta_range.setter    
     def theta_range(self, theta_range):
         # Change the theta range:
-        if self._thetas.size() > 2:
-            self._thetas = numpy.linspace(theta_range[0], theta_range[1], self._thetas.size())
+        if self.thetas.size() > 2:
+            self.thetas = numpy.linspace(theta_range[0], theta_range[1], self._thetas.size())
         else:
-            self._thetas = [theta_range[0], theta_range[1]]
+            self.thetas = [theta_range[0], theta_range[1]]
         
     @property        
     def theta_step(self):
@@ -277,9 +283,13 @@ class meta(subclass):
     '''
     This object contains various properties of the imaging system and the history of pre-processing.
     '''
-    geometry = geometry()
+    geometry = None
     history = history()
 
+    def __init__(self, parent):
+        subclass.__init__(self, parent)
+        self.geometry = geometry(self._parent)
+        
     physics = {'voltage': 0, 'current':0, 'exposure': 0}
     lyrics = ''
     
@@ -306,21 +316,32 @@ class data(subclass):
     # Get/Set methods:
     @property
     def data(self):
-        return self._data
+        dx = self._parent._data_sampling
+        dt = 1#self._parent._data_sampling
+        
+        if dx + dt > 2:
+            return numpy.ascontiguousarray(self._data[::dx, ::dt, ::dx])
+        else:
+            return self._data
         
     @data.setter
     def data(self, data):
+        dx = self._parent._data_sampling
+        dt = 1#self._parent._data_sampling
         
         if self._backup_update:
-            self._backup = data.copy()
+            self._parent.io.save_backup()
             
-        self._data = data
+        self._data[::dx, ::dt, ::dx] = data
         
         self._parent.meta.history.add_record('set data.data', [])
         
     @property        
     def shape(self):
-        return self._data.shape
+        dx = self._parent._data_sampling
+        dt = 1#self._parent._data_sampling
+        
+        return self._data[::dx, ::dt, ::dx].shape
         
     @property            
     def size_mb(self):
@@ -340,7 +361,7 @@ class data(subclass):
         interp_grid = numpy.transpose(numpy.meshgrid(target_theta, numpy.arange(sz[0]), numpy.arange(sz[2])), (1,2,3,0))
         original_grid = (numpy.arange(sz[0]), thetas, numpy.arange(sz[2]))
 
-        return interp_sc.interpn(original_grid, self._data, interp_grid)
+        return interp_sc.interpn(original_grid, self.data, interp_grid)
 
 # **************************************************************
 #           IO class and subroutines
@@ -575,25 +596,35 @@ class io(subclass):
         '''
         Make a copy of data in memory, just in case.
         '''
-        self._parent.data._backup = self._parent.data._data.copy()
+        self._parent.data._backup = (self._parent.data._data.copy(), self._parent.meta.geometry.thetas.copy())
 
         # add record to the history:
         self._parent.meta.history.add_record('io.save_backup', 'backup saved')
 
         self._parent.message('Backup saved.')
+        
+        # In case the user wants to keep the backup...
+        return self._parent.data._backup
 
-    def load_backup(self):
+    def load_backup(self, backup = None):
         '''
         Retrieve a copy of data from the backup.
         '''
-        if self._parent.data._backup == [] or self._parent.data._backup is None:
-            self._parent.error('No backup found in memory!')
+        # If backup is provided:
+        if not backup is None:
+            self._parent.data._data = backup[0].copy()
+            self._parent.meta.geometry.thetas = backup[1].copy()    
+            
+        else:    
+            if self._parent.data._backup == [] or self._parent.data._backup is None:
+                self._parent.error('I can`t find a backup, master.')
 
-        self._parent.data._data = self._parent.data._backup.copy()
+            self._parent.data._data = self._parent.data._backup[0].copy()
+            self._parent.meta.geometry.thetas = self._parent.data._backup[1].copy()
 
-        # Clean memory:
-        self._parent.data._backup = None
-        gc.collect()
+            # Clean memory:
+            self._parent.data._backup = None
+            gc.collect()
 
         # Add record to the history:
         self._parent.meta.history.add_record('io.load_backup', 'backup loaded')
@@ -895,11 +926,14 @@ class display(subclass):
             plt.figure()
 
 
-    def slice(self, slice_num, dim_num = 0, fig_num = [], mirror = False, upsidedown = False):
+    def slice(self, slice_num = None, dim_num = 0, fig_num = [], mirror = False, upsidedown = False):
         '''
         Display a 2D slice of 3D volumel
         '''
         self._figure_maker_(fig_num)
+
+        if slice_num is None:
+            slice_num = self._parent.data.shape[0] // 2
 
         img = extract_2d_array(dim_num, slice_num, self._parent.data.data)
 
@@ -935,7 +969,7 @@ class display(subclass):
         '''
         self._figure_maker_(fig_num)
 
-        img = self._parent.data._data.sum(dim_num)
+        img = self._parent.data.data.sum(dim_num)
         plt.imshow(img, cmap = self._cmap)
         
         plt.colorbar()
@@ -947,7 +981,7 @@ class display(subclass):
         '''
         self._figure_maker_(fig_num)
 
-        img = self._parent.data._data.max(dim_num)
+        img = self._parent.data.data.max(dim_num)
         plt.imshow(img, cmap = self._cmap)
         
         plt.colorbar()
@@ -959,7 +993,7 @@ class display(subclass):
         '''
         self._figure_maker_(fig_num)
 
-        img = self._parent.data._data.min(dim_num)
+        img = self._parent.data.data.min(dim_num)
         plt.imshow(img, cmap = self._cmap)
         
         plt.colorbar()
@@ -1022,6 +1056,9 @@ class analyse(subclass):
     
     def l2_norm(self):
         return numpy.sum(self._parent.data.data ** 2)
+        
+    def l1_norm(self):
+        return numpy.sum(numpy.abs(self._parent.data.data))
 
     def mean(self):
         return numpy.mean(self._parent.data.data)
@@ -1076,7 +1113,7 @@ class process(subclass):
         Apply an arbitrary function:
         '''
         print(func)
-        self._parent.data._data = func(self._parent.data._data)
+        self._parent.data.data = func(self._parent.data.data)
 
         # add a record to the history:
         self._parent.meta.history.add_record('process.arbitrary_function', func.__name__)
@@ -1088,9 +1125,9 @@ class process(subclass):
         Apply correction to miscalibrated pixels.
         '''
         # Compute mean image of intensity variations that are < 5x5 pixels
-        res = self._parent.data._data - ndimage.filters.median_filter(self._parent.data._data, [kernel, 1, kernel])
+        res = self._parent.data.data - ndimage.filters.median_filter(self._parent.data.data, [kernel, 1, kernel])
         res = res.mean(1)
-        self._parent.data._data -= res.reshape((res.shape[0], 1, res.shape[1]))
+        self._parent.data.data -= res.reshape((res.shape[0], 1, res.shape[1]))
         self._parent.meta.history.add_record('Pixel calibration', 1)
         self._parent.message('Pixel calibration correction applied.')
 
@@ -1098,22 +1135,22 @@ class process(subclass):
         '''
         Expand the middle line
         '''
-        self._parent.data._data[:,:, 0:self._parent.data.shape[2]//2 - 2] = self._parent.data._data[:,:, 2:self._parent.data.shape[2]/2]
-        self._parent.data._data[:,:, self._parent.data.shape[2]//2 + 2:] = self._parent.data._data[:,:, self._parent.data.shape[2]//2:-2]
+        self._parent.data.data[:,:, 0:self._parent.data.shape[2]//2 - 2] = self._parent.data.data[:,:, 2:self._parent.data.shape[2]/2]
+        self._parent.data.data[:,:, self._parent.data.shape[2]//2 + 2:] = self._parent.data.data[:,:, self._parent.data.shape[2]//2:-2]
 
         # Fill in two extra pixels:
         for ii in range(-2,2):
             closest_offset = -3 if (numpy.abs(-3-ii) < numpy.abs(2-ii)) else 2
-            self._parent.data._data[:,:, self._parent.data.shape[2]//2 - ii] = self._parent.data._data[:,:, self._parent.data.shape[2]//2 + closest_offset]
+            self._parent.data.data[:,:, self._parent.data.shape[2]//2 - ii] = self._parent.data.data[:,:, self._parent.data.shape[2]//2 + closest_offset]
 
         # Then in columns
-        self._parent.data._data[0:self._parent.data.shape[0]//2 - 2,:,:] = self._parent.data._data[2:self._parent.data.shape[0]//2,:,:]
-        self._parent.data._data[self._parent.data.shape[0]//2 + 2:, :, :] = self._parent.data._data[self._parent.data.shape[0]//2:-2,:,:]
+        self._parent.data.data[0:self._parent.data.shape[0]//2 - 2,:,:] = self._parent.data.data[2:self._parent.data.shape[0]//2,:,:]
+        self._parent.data.data[self._parent.data.shape[0]//2 + 2:, :, :] = self._parent.data.data[self._parent.data.shape[0]//2:-2,:,:]
 
         # Fill in two extra pixels:
         for jj in range(-2,2):
             closest_offset = -3 if (numpy.abs(-3-jj) < numpy.abs(2-jj)) else 2
-            self._parent.data._data[self._parent.data.shape[0]//2 - jj,:,:] = self._parent.data._data[self._parent.data.shape[0]//2 + closest_offset,:,:]
+            self._parent.data.data[self._parent.data.shape[0]//2 - jj,:,:] = self._parent.data.data[self._parent.data.shape[0]//2 + closest_offset,:,:]
 
         self._parent.meta.history.add_record('Quadrant shift', 1)
         self._parent.message('Medipix quadrant shift applied.')
@@ -1127,12 +1164,12 @@ class process(subclass):
             if self._parent.meta.geometry.roi_fov:
                 self._parent.message('Object is larger than the FOV!')
                 
-                air_values = numpy.ones_like(self._parent.data._data[:,:,0]) * 2**16 - 1
+                air_values = numpy.ones_like(self._parent.data.data[:,:,0]) * 2**16 - 1
             else:
-                air_values = numpy.max(self._parent.data._data, axis = 2)
+                air_values = numpy.max(self._parent.data.data, axis = 2)
                 
             air_values = air_values.reshape((air_values.shape[0],air_values.shape[1],1))
-            self._parent.data._data = self._parent.data._data / air_values
+            self._parent.data.data = self._parent.data.data / air_values
             
             # add a record to the history: 
             self._parent.meta.history.add_record('process.flat_field', 1)
@@ -1151,10 +1188,10 @@ class process(subclass):
 
             if not self._parent.data._dark is None:
                 for ii in range(0, n_proj):
-                    self._parent.data._data[:, ii, :] = (self._parent.data._data[:, ii, :] - self._parent.data._dark) / (self._parent.data._ref - self._parent.data._dark)
+                    self._parent.data.data[:, ii, :] = (self._parent.data.data[:, ii, :] - self._parent.data._dark) / (self._parent.data._ref - self._parent.data._dark)
             else:
                 for ii in range(0, n_proj):
-                    self._parent.data._data[:, ii, :] = (self._parent.data._data[:, ii, :]) / (self._parent.data._ref)
+                    self._parent.data.data[:, ii, :] = (self._parent.data.data[:, ii, :]) / (self._parent.data._ref)
 
             # add a record to the history:
             self._parent.meta.history.add_record('process.flat_field', 1)
@@ -1178,7 +1215,7 @@ class process(subclass):
                 weight = 0.0
             return weight
 
-        weights = numpy.zeros_like(self._parent.data._data, dtype=numpy.float32)
+        weights = numpy.zeros_like(self._parent.data.data, dtype=numpy.float32)
         sdd = self._parent.meta.geometry.src2det
         for u in range(0,weights.shape[2]):
             weights[:,:,u] = u
@@ -1194,7 +1231,7 @@ class process(subclass):
             for u in range(0, weights.shape[2]):
                 weights[:,ang,u] = _Parker_window(theta = tet, gamma = weights[0,ang,u], fan=fan_angle)
 
-        self._parent.data._data *= weights
+        self._parent.data.data *= weights
         # add a record to the history:
         self._parent.meta.history.add_record('process.short_scan', 1)
 
@@ -1210,15 +1247,15 @@ class process(subclass):
 
         # If not, apply!
         if (air_intensity != 1.0):
-            self._parent.data._data /= air_intensity
+            self._parent.data.data /= air_intensity
             
         # In-place negative logarithm
-        numpy.log(self._parent.data._data, out = self._parent.data._data)
-        numpy.negative(self._parent.data._data, out = self._parent.data._data)
-        self._parent.data._data = numpy.float32(self._parent.data._data)
+        numpy.log(self._parent.data.data, out = self._parent.data.data)
+        numpy.negative(self._parent.data.data, out = self._parent.data.data)
+        self._parent.data.data = numpy.float32(self._parent.data.data)
         
         # Apply a bound to large values:
-        numpy.clip(self._parent.data._data, a_min = lower_bound, a_max = upper_bound, out = self._parent.data._data)
+        numpy.clip(self._parent.data.data, a_min = lower_bound, a_max = upper_bound, out = self._parent.data.data)
 
         self._parent.message('Logarithm is applied.')
         self._parent.meta.history.add_record('process.log(upper_bound)', upper_bound)
@@ -1228,11 +1265,11 @@ class process(subclass):
         Gets rid of nasty speakles
         '''
         # Make a smooth version of the data and look for outlayers:
-        smooth = ndimage.filters.median_filter(self._parent.data._data, [kernel, 1, kernel])
-        mask = self._parent.data._data / smooth
+        smooth = ndimage.filters.median_filter(self._parent.data.data, [kernel, 1, kernel])
+        mask = self._parent.data.data / smooth
         mask = (numpy.abs(mask) > 1.5) | (numpy.abs(mask) < 0.75)
 
-        self._parent.data._data[mask] = smooth[mask]
+        self._parent.data.data[mask] = smooth[mask]
 
         self._parent.message('Salt and pepper filter is applied.')
 
@@ -1243,7 +1280,7 @@ class process(subclass):
         Tilts the sinogram
         '''
         for ii in range(0, self._parent.data.shape[1]):
-            self._parent.data._data[:, ii, :] = interp.rotate(numpy.squeeze(self._parent.data._data[:, ii, :]), -tilt, reshape=False)
+            self._parent.data.data[:, ii, :] = interp.rotate(numpy.squeeze(self._parent.data.data[:, ii, :]), -tilt, reshape=False)
             
         self._parent.message('Tilt is applied.')
         
@@ -1254,31 +1291,24 @@ class process(subclass):
         sz = self._parent.data.shape[2] // 2
 
         if test_path is not None:
-            rotation.write_center(self._parent.data._data, theta=self._parent.meta.geometry.thetas, dpath=test_path, ind=ind, cen_range=cen_range, sinogram_order=True)
+            rotation.write_center(self._parent.data.data, theta=self._parent.meta.geometry.thetas, dpath=test_path, ind=ind, cen_range=cen_range, sinogram_order=True)
 
         else:
             if offset is None:
-                offset = sz-rotation.find_center(self._parent.data._data, self._parent.meta.geometry.thetas,  sinogram_order=True)[0]
-                #offset = sz-rotation.find_center_pc(self._parent.data._data[:,0,:], self._parent.data._data[:,self._parent.data.shape(1)//2,:])p
+                offset = sz-rotation.find_center(self._parent.data.data, self._parent.meta.geometry.thetas,  sinogram_order=True)[0]
 
             else:
                 # Do nothing is the offset is less than 1 pixel
                 if (numpy.abs(offset) >= 1):
-                    self._parent.data._data = interp.shift(self._parent.data._data, (0,0,offset))
+                    self._parent.data.data = interp.shift(self._parent.data.data, (0,0,offset))
                     self._parent.meta.history.add_record('process.center_shift(offset)', offset)
 
                     self._parent.message('Horizontal offset corrected.')
                 else:
                     self._parent.warning("Center shift found an offset smaller than 1. Correction won't be applied")
 
-    def bin_theta(self):
-        '''
-        Bin angles with a factor of two
-        '''
-        self._parent.data._data = (self._parent.data._data[:,0:-1:2,:] + self._parent.data._data[:,1::2,:]) / 2
-        self._parent.meta.geometry.thetas = numpy.array(self._parent.meta.geometry.thetas[0:-1:2] + self._parent.meta.geometry.thetas[1::2]) / 2
 
-    def bin_data(self):
+    def bin_data(self, bin_theta = True):
         '''
         Bin data with a factor of two
         '''
@@ -1286,8 +1316,14 @@ class process(subclass):
         self._parent.data._data = (self._parent.data._data[0:-1:2, :, :] + self._parent.data._data[1::2, :, :]) / 2
 
         self._parent.meta.geometry.det_pixel *= 2
-
-
+        
+        '''
+        Bin angles with a factor of two
+        '''
+        if bin_theta:
+            self._parent.data._data = (self._parent.data._data[:,0:-1:2,:] + self._parent.data._data[:,1::2,:]) / 2
+            self._parent.meta.geometry.thetas = numpy.array(self._parent.meta.geometry.thetas[0:-1:2] + self._parent.meta.geometry.thetas[1::2]) / 2
+        
     def crop(self, top_left, bottom_right):
         '''
         Crop the sinogram
@@ -1329,23 +1365,171 @@ from scipy import interpolate
 import math
 import odl
 
+from scipy import optimize
+from scipy.optimize import minimize_scalar
+
 class reconstruct(subclass):
     '''
     Reconstruction algorithms: FDK, SIRT, KL, FISTA etc.
     '''
+    # Some precalculated masks for ASTRA:
     _projection_mask = None
     _reconstruction_mask = None
     _projection_filter = None
     
+    # Display while computing:
     _display_callback = False
-    _auto_adjust_volume = True
-    
+       
     def __init__(self, proj = []):
         subclass.__init__(self, proj)
         
         self.vol_geom = None
         self.proj_geom = None
-        self.geom_modifier = {'det_tra_vrt': 0, 'det_tra_hrz':0, 'src_tra_vrt':0, 'src_tra_hrz':0} 
+            
+    def _modifier_l2cost(self, value, modifier = 'rotation_axis'):
+               
+        # Compute an image from the shifted data:
+        if modifier == 'rotation_axis':
+            self._parent.meta.geometry.rotation_axis_shift(value)
+            
+        elif modifier in self._parent.meta.geometry.modifiers.keys():
+            self._parent.meta.geometry.modifiers[modifier] = value           
+
+        else:
+            self._parent.error('Modifier not found!')
+            
+        vol = self.FDK()
+        
+        return -vol.analyse.l2_norm()
+        
+    def _parabolic_min(self, values, index, space):    
+        '''
+        Use parabolic interpolation to find the minimum:
+        '''
+        if (index > 0) & (index < (values.size - 1)):
+            # Compute parabolae:
+            x = space[index-1:index+2]    
+            y = values[index-1:index+2]
+
+            denom = (x[0]-x[1]) * (x[0]-x[2]) * (x[1]-x[2])
+            A = (x[2] * (y[1]-y[0]) + x[1] * (y[0]-y[2]) + x[0] * (y[2]-y[1])) / denom
+            B = (x[2]*x[2] * (y[0]-y[1]) + x[1]*x[1] * (y[2]-y[0]) + x[0]*x[0] * (y[1]-y[2])) / denom
+		 
+            x0 = -B / 2 / A   
+            
+        else:
+            
+            x0 = space[index]
+
+        return x0
+            
+            
+    def _full_search(self, func, bounds, maxiter, args):
+        '''
+        Performs full search of the minimum inside the given bounds.
+        '''
+        func_values = numpy.zeros(maxiter)
+        
+        space = numpy.linspace(bounds[0], bounds[1], maxiter)
+        
+        ii = 0
+        for val in space:
+            func_values[ii] = func(val, modifier = args)
+            ii += 1
+        
+#        print('***********')
+#        print(func_values)
+        min_index = func_values.argmin()    
+        print('Found minimum', space[min_index])
+        
+        x0 = self._parabolic_min(func_values, min_index, space)
+        
+        print('Parabolic minimum', x0)
+        
+        return x0
+        
+    def optimize_geometry_modifier(self, modifier = 'det_rot', guess = 0, subscale = 8, full_search = False):
+        '''
+        Maximize the sharpness of the reconstruction by optimizing one of the geometry modifiers:
+        '''
+        
+        self._parent.message('Optimization is started...')
+        self._parent.message('Initial guess is %01f' % guess)
+        
+        # Downscale the data:
+        while subscale >= 1:
+            
+            self._parent.message('Subscale factor %01d' % subscale)
+            
+            self._parent._data_sampling = subscale
+            
+            # Create a ramp filter so FDK will calculate a gradient:
+            self._initialize_ramp_filter(power = 2)
+                            
+            if full_search:
+                guess = self._full_search(self._modifier_l2cost, bounds = [guess / subscale - 2, guess / subscale + 2], maxiter = 5, args = modifier) * subscale
+            else:                    
+                opt = optimize.minimize(self._modifier_l2cost, x0 = guess / subscale, bounds = ((guess / subscale - 2, guess / subscale + 2),), method='COBYLA', 
+                                        options = {'maxiter': 15, 'disp': False}, args = modifier)
+                
+                guess = opt.x * subscale
+            
+            self._parent.message('Current guess is %01f' % guess)
+            
+            vol = self.FDK()
+            vol.display.slice()
+            
+            subscale = subscale // 2
+            
+        self._parent._data_sampling = 1    
+        self._initialize_ramp_filter(power = 1)    
+        
+        return guess
+        
+    def optimize_rotation_center(self, guess = 0, subscale = 8, center_of_mass = True, full_search = False):
+        '''
+        Find the rotation center using a subscaling factor. 
+        Make sure that if you dont use center_of_mass or the initial guess, use subscale that is large enough.
+        '''
+        
+        if center_of_mass:
+            guess = self._parent.analyse.center_of_mass()[1] - self._parent.data.shape[2] // 2
+
+        self._parent.message('Searching for the center of rotation...')
+        self._parent.message('Initial guess is %01f' % guess)
+        
+        # Downscale the data:
+        while subscale >= 1:
+            
+            self._parent.message('Subscale factor %01d' % subscale)
+            
+            self._parent._data_sampling = subscale
+            
+            # Create a ramp filter so FDK will calculate a gradient:
+            self._initialize_ramp_filter(power = 2)
+                               
+            if full_search:
+                guess = self._full_search(self._modifier_l2cost, bounds = [guess / subscale - 2, guess / subscale + 2], maxiter = 5, args = 'rotation_axis') * subscale
+            else: 
+                opt = optimize.minimize(self._modifier_l2cost, x0 = guess / subscale, bounds = ((guess / subscale - 2, guess / subscale + 2),), method='COBYLA', 
+                                        options = {'maxiter': 15, 'disp': False}, args = 'rotation_axis')
+                
+            
+                guess = opt.x * subscale
+                
+            self._parent.meta.geometry.rotation_axis_shift(guess / subscale)
+                
+            self._parent.message('Current guess is %01f' % guess)
+            
+            vol = self.FDK()
+            vol.display.slice()
+            
+            subscale = subscale // 2
+            
+        self._parent._data_sampling = 1    
+        self._initialize_ramp_filter(power = 1)    
+        
+        return guess
         
     def initialize_projection_mask(self, weight_poisson = False, weight_histogram = None, pixel_mask = None):
         '''
@@ -1367,11 +1551,11 @@ class reconstruct(subclass):
         # Create a volume containing only ones for forward projection weights
         sz = self._parent.data.shape
 
-        self._projection_mask = prnt.data._data * 0
+        self._projection_mask = prnt.data.data * 0
 
         # if weight_poisson: introduce weights based on the value of intensity image:
         if not weight_poisson is None:
-            self._projection_mask = self._projection_mask * numpy.sqrt(numpy.exp(-prnt.data._data))
+            self._projection_mask = self._projection_mask * numpy.sqrt(numpy.exp(-prnt.data.data))
 
         # if weight_histogram is provided:
         if not weight_histogram is None:
@@ -1379,7 +1563,7 @@ class reconstruct(subclass):
             y = weight_histogram[1]
             f = interpolate.interp1d(x, y, kind = 'linear', fill_value = 'extrapolate')
 
-            self._projection_mask = self._projection_mask * f(numpy.exp(-prnt.data._data))
+            self._projection_mask = self._projection_mask * f(numpy.exp(-prnt.data.data))
 
         # apply pixel mask to every projection if it is provided:
         if not pixel_mask is None:
@@ -1394,133 +1578,26 @@ class reconstruct(subclass):
         '''
         prnt = self._parent
 
-        sz = prnt.data.shape()[2]
+        sz = prnt.data.shape[2]
 
         # compute radius of the defined cylinder
-        det_width = prnt.data.shape()[2] / 2
+        det_width = prnt.data.shape[2] / 2
         src2obj = prnt.meta.geometry.src2obj
         total = prnt.meta.geometry.src2det
         pixel = prnt.meta.geometry.det_pixel
 
         # Compute the smallest radius and cut the cornenrs:
-        radius = 2 * det_width * src2obj / numpy.sqrt(total**2 + (det_width*pixel)**2)
+        radius = 2 * det_width * src2obj / numpy.sqrt(total**2 + (det_width*pixel[0])**2) - 3
 
         # Create 2D mask:
         yy,xx = numpy.ogrid[-sz//2:sz//2, -sz//2:sz//2]
 
-        self._reconstruction_mask = numpy.array(xx**2 + yy**2 <= radius**2, dtype = 'float32')
+        self._reconstruction_mask = numpy.array(xx**2 + yy**2 < radius**2, dtype = 'float32')
 
         # Replicate to 3D:
-        self._reconstruction_mask = numpy.ascontiguousarray((numpy.tile(self._reconstruction_mask[None, :,:], [astra.functions.geom_size(self.vol_geom)[0], 1, 1])))
+        self._reconstruction_mask = numpy.ascontiguousarray((numpy.tile(self._reconstruction_mask[None, :,:], [prnt.data.shape[0], 1, 1])))
 
         prnt.message('Reconstruction mask is initialized')
-
-
-    def project_thetas(self, parameter_value = 0, parameter = 'axis_offset'):
-        '''
-        This routine produces a single slice with a sigle ray projected into it from each projection angle.
-        Can be used as a simple diagnostics for angle coverage.
-        '''
-        prnt = self._parent
-        sz = prnt.data.shape()
-
-        # Make a synthetic sinogram:
-        sinogram = numpy.zeroes((1, sz[1], sz[2]))
-
-        # For compatibility purposes make sure that the result is 3D:
-        sinogram = numpy.ascontiguousarray(sinogram)
-
-        # Initialize ASTRA:
-        sz = numpy.array(prnt.data.shape())
-        theta = prnt.meta.geometry.thetas
-
-        # Synthetic sinogram contains values of thetas at the central pixel
-        ii = 0
-        for theta_i in theta:
-            sinogram[:, ii, sz[2]//2] = theta_i
-            ii += 1
-
-        self._initialize_astra()
-
-        # Run the reconstruction:
-        epsilon = self._parse_unit('deg') # 1 degree
-        short_scan = numpy.abs(theta[-1] - 2*numpy.pi) > epsilon
-        vol = self._backproject(prnt.data._data, algorithm='FDK_CUDA', short_scan=short_scan)
-
-        return volume(vol)
-        # No need to make a history record - sinogram is not changed.
-
-
-
-    def slice_FDK(self, parameter_value = 0, parameter = 'axis_offset'):
-        '''
-        A quick calculation of a single central slice.
-        Returns a numpy array and not a volume object!
-        '''
-
-        prnt = self._parent
-
-        # Extract 1 pixel thin slice:
-        sinogram = prnt.data._data[prnt.data.shape(0)//2, :, :]
-        #sinogram = prnt.data._data
-
-        # For compatibility purposes make sure that the result is 3D:
-        sinogram = numpy.ascontiguousarray(sinogram[None, :])
-
-        # Initialize ASTRA:
-        sz = numpy.array(prnt.data.shape())
-        pixel_size = prnt.meta.geometry.det_pixel
-        det2obj = prnt.meta.geometry.det2obj
-        src2obj = prnt.meta.geometry.src2obj
-        theta = prnt.meta.geometry.thetas
-
-        # Temporary change of one of the parameters:
-        if abs(parameter_value) >0:
-
-            if parameter == 'axis_offset':
-                # Apply shift:
-                sinogram = interp.shift(sinogram, (0,0, parameter_value))
-            elif parameter == 'det_pixel':
-                pixel_size = parameter_value
-
-            elif parameter == 'det2obj':
-                det2obj = parameter_value
-
-            elif parameter == 'src2obj':
-                src2obj = parameter_value
-
-            else: prnt.error("Can't recognize given parameter.")
-
-        sz[0] = 1
-        self._initialize_astra(sz, pixel_size, det2obj, src2obj, theta)
-
-        short_scan = (theta.max() - theta.min()) < (numpy.pi * 1.99)
-
-        vol = self._backproject(sinogram, algorithm='FDK_CUDA', short_scan=short_scan)
-
-        return vol
-        # No need to make a history record - sinogram is not changed.
-
-    def slice_scan(self, scan_range = numpy.linspace(-10, 10, 11), parameter = 'axis_offset'):
-        '''
-        Create a scan of different rotation axis offsets:
-        '''
-        sz = self._parent.data.shape
-
-        print('Starting an', parameter, ' scan.')
-
-        # Create a volume to put a scan into:
-        vol = numpy.zeros([scan_range.shape[0], sz[2], sz[2]])
-
-        ii = 0
-        for val in scan_range:
-            print(val)
-
-            img = self.slice_FDK(val, parameter)
-            vol[ii, :, :] = img
-            ii += 1
-
-        return volume(vol)
 
     def _initialize_odl(self):
         '''
@@ -1572,9 +1649,9 @@ class reconstruct(subclass):
         # Isotropic TV-regularization i.e. the l1-norm
         # l2-squared data matching unless min_l1_norm == True
         if min_l1_norm:
-            l2_norm = (odl.solvers.L1Norm(ray_trafo.range)).translated(numpy.transpose(self._parent.data._data, axes = [1, 2, 0]))
+            l2_norm = (odl.solvers.L1Norm(ray_trafo.range)).translated(numpy.transpose(self._parent.data.data, axes = [1, 2, 0]))
         else:
-            l2_norm = (odl.solvers.L2NormSquared(ray_trafo.range)).translated(numpy.transpose(self._parent.data._data, axes = [1, 2, 0]))
+            l2_norm = (odl.solvers.L2NormSquared(ray_trafo.range)).translated(numpy.transpose(self._parent.data.data, axes = [1, 2, 0]))
         
         if not self._projection_mask is None:
             l2_norm = l2_norm * ray_trafo.range.element(self._projection_mask)
@@ -1619,7 +1696,7 @@ class reconstruct(subclass):
         fbp = odl.tomo.fbp_op(ray_trafo, filter_type='Shepp-Logan', frequency_scaling=0.8)
 
         # Run the algorithm
-        x = fbp(numpy.transpose(self._parent.data._data, axes = [1, 2, 0]))
+        x = fbp(numpy.transpose(self._parent.data.data, axes = [1, 2, 0]))
         
         return volume(numpy.transpose(x.asarray(), axes = [2, 0, 1])[:,::-1,:])
         
@@ -1642,7 +1719,7 @@ class reconstruct(subclass):
         x = ray_trafo.domain.one()
         
         # FBP:
-        odl.solvers.mlem(ray_trafo, x, numpy.transpose(self._parent.data._data, axes = [1, 2, 0]), 
+        odl.solvers.mlem(ray_trafo, x, numpy.transpose(self._parent.data.data, axes = [1, 2, 0]), 
                                 niter = iterations, callback = callback)
         
         return volume(numpy.transpose(x.asarray(), axes = [2, 0, 1])[:,::-1,:])    
@@ -1662,9 +1739,12 @@ class reconstruct(subclass):
         if short_scan is None:
             short_scan = (theta.max() - theta.min()) < (numpy.pi * 1.99)
         
-        print('Short scan: ' + str(short_scan))
-        vol = self._backproject(prnt.data._data, algorithm='FDK_CUDA', short_scan = short_scan)
-
+        vol = self._backproject(prnt.data.data, algorithm='FDK_CUDA', short_scan = short_scan)
+        
+        # Reconstruction mask is applied only in native ASTRA SIRT. Apply it here:
+        if not self._reconstruction_mask is None:
+            vol = self._reconstruction_mask * vol
+        
         vol = volume(vol)
         #vol.history['FDK'] = 'generated in '
         self._parent.meta.history.add_record('set data.data', [])
@@ -1681,7 +1761,7 @@ class reconstruct(subclass):
         self._initialize_astra()
 
         # Run the reconstruction:
-        vol = self._backproject(prnt.data._data, algorithm = 'SIRT3D_CUDA', iterations = iterations, min_constraint= min_constraint)
+        vol = self._backproject(prnt.data.data, algorithm = 'SIRT3D_CUDA', iterations = iterations, min_constraint= min_constraint)
 
         return volume(vol)
         # No need to make a history record - sinogram is not changed.
@@ -1712,7 +1792,7 @@ class reconstruct(subclass):
         for ii_iter in range(iterations):
             fwd_proj_vols = self._forwardproject(vol)
 
-            residual = (prnt.data._data - fwd_proj_vols) * weights
+            residual = (prnt.data.data - fwd_proj_vols) * weights
 
             if not self._projection_mask is None:
                 residual *= self._projection_mask
@@ -1736,7 +1816,7 @@ class reconstruct(subclass):
         self._initialize_astra()
 
         # Create a volume containing only ones for forward projection weights
-        sz = self._parent.data.shape()
+        sz = self._parent.data.shape
         theta = self._parent.meta.geometry.thetas
 
         vol_ones = numpy.ones((sz[0], sz[2], sz[2]), dtype=numpy.float32)
@@ -1747,11 +1827,11 @@ class reconstruct(subclass):
         sigma_1 = 1.0  / (1.0 + sigma)
         tau = 1.0 / theta.shape[0]
 
-        p = numpy.zeros_like(prnt.data._data)
+        p = numpy.zeros_like(prnt.data.data)
         ehn_sol = vol.copy()
 
         for ii_iter in range(iterations):
-            p = (p + prnt.data._data - self._forwardproject(ehn_sol) * sigma) * sigma_1
+            p = (p + prnt.data.data - self._forwardproject(ehn_sol) * sigma) * sigma_1
 
             old_vol = vol.copy()
             vol += self._backproject(p, algorithm='BP3D_CUDA', min_constraint=min_constraint) * tau
@@ -1775,11 +1855,46 @@ class reconstruct(subclass):
         self._initialize_astra()
 
         # Run the reconstruction:
-        vol = self._backproject(prnt.data._data, algorithm = 'CGLS3D_CUDA', iterations = iterations, min_constraint=min_constraint)
+        vol = self._backproject(prnt.data.data, algorithm = 'CGLS3D_CUDA', iterations = iterations, min_constraint=min_constraint)
 
 
         return volume(vol)
-        # No need to make a history record - sinogram is not changed.        
+        # No need to make a history record - sinogram is not changed.   
+        
+        
+    def project_thetas(self, parameter_value = 0, parameter = 'axis_offset'):
+        '''
+        This routine produces a single slice with a sigle ray projected into it from each projection angle.
+        Can be used as a simple diagnostics for angle coverage.
+        '''
+        prnt = self._parent
+        sz = prnt.data.shape
+
+        # Make a synthetic sinogram:
+        sinogram = numpy.zeroes((1, sz[1], sz[2]))
+
+        # For compatibility purposes make sure that the result is 3D:
+        sinogram = numpy.ascontiguousarray(sinogram)
+
+        # Initialize ASTRA:
+        sz = numpy.array(prnt.data.shape)
+        theta = prnt.meta.geometry.thetas
+
+        # Synthetic sinogram contains values of thetas at the central pixel
+        ii = 0
+        for theta_i in theta:
+            sinogram[:, ii, sz[2]//2] = theta_i
+            ii += 1
+
+        self._initialize_astra()
+
+        # Run the reconstruction:
+        epsilon = self._parse_unit('deg') # 1 degree
+        short_scan = numpy.abs(theta[-1] - 2*numpy.pi) > epsilon
+        vol = self._backproject(prnt.data.data, algorithm='FDK_CUDA', short_scan=short_scan)
+
+        return volume(vol)
+        # No need to make a history record - sinogram is not changed.
     
     def _apply_modifiers(self):
         '''
@@ -1909,7 +2024,7 @@ class reconstruct(subclass):
       cfg['option'] = {}
       if short_scan:
           cfg['option']['ShortScan'] = True
-      print(cfg)
+      
       if (min_constraint is not None):
           cfg['option']['MinConstraint'] = min_constraint
       
@@ -1929,6 +2044,7 @@ class reconstruct(subclass):
     
           # Use projection and reconstruction masks:
           if not self._reconstruction_mask is None:
+              print(self.vol_geom)
               mask_id = astra.data3d.link('-vol', self.vol_geom, self._reconstruction_mask)
               cfg['option']['ReconstructionMaskId'] = mask_id
     
@@ -1994,7 +2110,7 @@ class reconstruct(subclass):
         self._initialize_astra()
 
         # Run the reconstruction:
-        vol = self._backproject(numpy.ones(prnt.data._data.shape, dtype = 'float32'))
+        vol = self._backproject(numpy.ones(prnt.data.shape, dtype = 'float32'))
 
         return volume(vol)
 
@@ -2003,7 +2119,7 @@ class reconstruct(subclass):
         prnt = self._parent
 
         # Initialize ASTRA:
-        sz = prnt.data.shape()
+        sz = prnt.data.shape
         pixel_size = prnt.meta.geometry.det_pixel
         det2obj = prnt.meta.geometry.det2obj
         src2obj = prnt.meta.geometry.src2obj
@@ -2073,6 +2189,9 @@ class volume(object):
     meta = []
     postprocess = []
 
+    # Sampling of the projection data volume:
+    _data_sampling = 1
+
     def __init__(self, vol = []):
         self.io = io(self)
         self.display = display(self)
@@ -2133,6 +2252,9 @@ class projections(object):
 
     # Private:
     _wisdom_status = 1
+    
+    # Sampling of the projection data volume:
+    _data_sampling = 1
 
     def __init__(self):
         self.io = io(self)
