@@ -554,7 +554,8 @@ class io(subclass):
         # Try to find the log file in the selected path
         fname = [x for x in os.listdir(path) if (os.path.isfile(os.path.join(path, x)) and os.path.splitext(os.path.join(path, x))[1] == '.csv')]
         if len(fname) == 0:
-            raise FileNotFoundError('XY shifts csv file not found in path: ' + path)
+            self._parent.warning('XY shifts csv file not found in path: ' + path)
+            return
         if len(fname) > 1:
             #raise UserWarning('Found several log files. Currently using: ' + log_file[0])
             self._parent.warning('Found several csv files. Currently using: ' + fname[0])
@@ -639,8 +640,10 @@ class io(subclass):
         if 'det_tilt' in geometry:
             geometry['det_tilt'] = geometry['det_tilt'] * self._parse_unit('deg')
             
-
-    def save_tiff(self, path = '', fname='data', digits = 4):
+    
+    
+    
+    def save(self, path = '', fname='data', fmt = 'tiff', slc_range = None, window = None, digits = 4, dtype = None):
         '''
         Saves the data to tiff files
         '''
@@ -654,7 +657,60 @@ class io(subclass):
             path = update_path(path, self)
             fname = os.path.join(path, fname)
             
-            for i in range(0,self._parent.data._data.shape[0]):
+            if slc_range is None:
+                slc_range = range(0,self._parent.data._data.shape[0])
+            
+            if dtype is None:
+                dtype = self._parent.data._data.dtype
+            
+            maxi = numpy.max(self._parent.data._data)
+            mini = numpy.min(self._parent.data._data)
+            
+            if (not (window is None)):
+                maxi = numpy.min([maxi, window[1]])
+                mini = numpy.max([mini, window[0]])
+            
+            for i in slc_range:
+                # Fix the file name
+                fname_tmp = fname
+                fname_tmp += '_'
+                fname_tmp += str(i).zfill(digits)
+                fname_tmp += '.' + fmt
+                
+                # Fix the windowing and output type
+                slc = numpy.array(self._parent.data._data[i,:,:], dtype = numpy.float32)
+                
+                if (not (window is None)):
+                    numpy.clip(a = slc, a_min = window[0], a_max = window[1], out = slc)
+                
+                # Rescale if integer type
+                if not (numpy.issubdtype(dtype, numpy.floating)):
+                    slc -= mini
+                    if (maxi != mini):
+                        slc /= (maxi - mini)
+                    slc *= numpy.iinfo(dtype).max
+                
+                # Save the image
+                im = Image.fromarray(numpy.asarray(slc, dtype=dtype))
+                im.save(fname_tmp)
+                
+                
+    
+    def save_tiff(self, path = '', fname='data', axis = 0, digits = 4):
+        '''
+        Saves the data to tiff files
+        '''
+        from PIL import Image
+        if self._parent.data._data is not None:
+        # First check if digit is large enough, otherwise add a digit
+            im_nb = self._parent.data._data.shape[axis]
+            if digits <= numpy.log10(im_nb):
+                digits = int(numpy.log10(im_nb)) + 1
+                
+            path = update_path(path, self)
+            fname = os.path.join(path, fname)
+            
+            for i in range(0,self._parent.data._data.shape[axis]):
                 fname_tmp = fname
                 fname_tmp += '_'
                 fname_tmp += str(i).zfill(digits)
@@ -1450,7 +1506,7 @@ class reconstruct(subclass):
         
         return volume(numpy.transpose(x.asarray(), axes = [2, 0, 1])[:,::-1,:])    
 
-    def FDK(self, short_scan = None):
+    def FDK(self, short_scan = None, min_constraint = None):
         '''
 
         '''
@@ -1465,11 +1521,12 @@ class reconstruct(subclass):
         if short_scan is None:
             short_scan = (theta.max() - theta.min()) < (numpy.pi * 1.99)
         
-        print('Short scan: ' + str(short_scan))
-        vol = self._backproject(prnt.data._data, algorithm='FDK_CUDA', short_scan = short_scan)
+        vol = self._backproject(prnt.data._data, algorithm='FDK_CUDA', short_scan = short_scan, min_constraint = min_constraint)
 
         vol = volume(vol)
         #vol.history['FDK'] = 'generated in '
+        
+        self._parent.message('FDK reconstruction performed.')
         return vol
         # No need to make a history record - sinogram is not changed.
 
@@ -1484,12 +1541,50 @@ class reconstruct(subclass):
 
         # Run the reconstruction:
         vol = self._backproject(prnt.data._data, algorithm = 'SIRT3D_CUDA', iterations = iterations, min_constraint= min_constraint)
-
+        
+        text = 'SIRT reconstruction performed with %d iterations.' % iterations
+        self._parent.message(text)
         return volume(vol)
         # No need to make a history record - sinogram is not changed.
+        
+        
+    def SIRT_CPU(self, proj_type = 'cuda3d', iterations = 10, relaxation = 1.0, min_constraint = None, max_constraint = None):
+        '''
 
+        '''
+        prnt = self._parent
+        # Initialize ASTRA:
+        self._initialize_astra()
+        out = numpy.zeros(astra.functions.geom_size(self.vol_geom), dtype=numpy.float32)
+        cfg = {}
+        proj_id = 0
+        rec_id = 0
+        sino_id = 0
+        sirt = astra.plugins.SIRTPlugin()
+        try:
+            proj_id = astra.create_projector(proj_type = proj_type, proj_geom = self.proj_geom, vol_geom = self.vol_geom)
+            rec_id = astra.data3d.link('-vol', self.vol_geom, out)
+            sino_id = astra.data3d.link('-sino', self.proj_geom, prnt.data._data)
+            cfg['ProjectorId'] = proj_id
+            cfg['ReconstructionDataId'] = rec_id
+            cfg['ProjectionDataId'] = sino_id
+            sirt.initialize(cfg = cfg, Relaxation = relaxation, MinConstraint = min_constraint, MaxConstraint = max_constraint)
+            sirt.run(its = iterations)
+            
+        finally:
+            astra.projector.delete(proj_id)
+            astra.data3d.delete([rec_id, sino_id])
+        
+        text = 'SIRT-CPU reconstruction performed with %d iterations.' % iterations
+        self._parent.message(text)
+        
+        return volume(out)
+        # No need to make a history record - sinogram is not changed.
+        
+    
+        
 
-    def SIRT_CPU(self, iterations = 10, min_constraint = None):
+    def SIRT_custom(self, iterations = 10, min_constraint = None):
         '''
 
         '''
@@ -1583,6 +1678,40 @@ class reconstruct(subclass):
         return volume(vol)
         # No need to make a history record - sinogram is not changed.
 
+
+    def CGLS_CPU(self, proj_type = 'cuda3d', iterations = 10):
+        '''
+
+        '''
+        prnt = self._parent
+        # Initialize ASTRA:
+        self._initialize_astra()
+        out = numpy.zeros(astra.functions.geom_size(self.vol_geom), dtype=numpy.float32)
+        cfg = {}
+        proj_id = 0
+        rec_id = 0
+        sino_id = 0
+        cgls = astra.plugins.CGLSPlugin()
+        try:
+            proj_id = astra.create_projector(proj_type = proj_type, proj_geom = self.proj_geom, vol_geom = self.vol_geom)
+            rec_id = astra.data3d.link('-vol', self.vol_geom, out)
+            sino_id = astra.data3d.link('-sino', self.proj_geom, prnt.data._data)
+            cfg['ProjectorId'] = proj_id
+            cfg['ReconstructionDataId'] = rec_id
+            cfg['ProjectionDataId'] = sino_id
+            cgls.initialize(cfg)
+            cgls.run(its = iterations)
+            
+        finally:
+            astra.projector.delete(proj_id)
+            astra.data3d.delete([rec_id, sino_id])
+        
+        text = 'CGLS-CPU reconstruction performed with %d iterations.' % iterations
+        self._parent.message(text)
+        
+        return volume(out)
+        # No need to make a history record - sinogram is not changed.
+    
     #----- ASTRA Utilities
     def _apply_geometry_modifiers(self, vectors):
         '''
@@ -1639,17 +1768,23 @@ class reconstruct(subclass):
             vectors = self.proj_geom['Vectors']
             if (self._parent.meta.geometry['det_offset'] != [0.0,0.0]):
                 vectors[:,3:6] = vectors[:,3:6] - self._parent.meta.geometry['det_offset'][0]/magnification * vectors[:,6:9]
-                self.vol_geom['option']['WindowMinX'] = -self.vol_geom['GridColCount'] / 2.0 - self._parent.meta.geometry['det_offset'][0]/magnification
-                self.vol_geom['option']['WindowMaxX'] = self.vol_geom['GridColCount'] / 2.0 - self._parent.meta.geometry['det_offset'][0]/magnification
+                #self.vol_geom['option']['WindowMinX'] = -self.vol_geom['GridColCount'] / 2.0 - self._parent.meta.geometry['det_offset'][0]/magnification - (self._parent.meta.geometry['det_offset'][0]/magnification)*(magnification-1.0)
+                #self.vol_geom['option']['WindowMaxX'] = self.vol_geom['GridColCount'] / 2.0 - self._parent.meta.geometry['det_offset'][0]/magnification - (self._parent.meta.geometry['det_offset'][0]/magnification)*(magnification-1.0)
+                #self.vol_geom['option']['WindowMinX'] = -self.vol_geom['GridColCount'] / 2.0 - self._parent.meta.geometry['det_offset'][0]
+                #self.vol_geom['option']['WindowMaxX'] = self.vol_geom['GridColCount'] / 2.0 - self._parent.meta.geometry['det_offset'][0]
+                
                 
                 # Shift the source by the de-magnified amount horizontally
                 vectors[:,0:3] = vectors[:,0:3] - self._parent.meta.geometry['det_offset'][0]/magnification * vectors[:,6:9]
                 
             
                 # Shift the detector to vertically align the optical axis and change the reconstruction window accordingly
-                vectors[:,3:6] = vectors[:,3:6] - self._parent.meta.geometry['det_offset'][1] * vectors[:,9:12]
-                self.vol_geom['option']['WindowMinZ'] = -self.vol_geom['GridSliceCount'] / 2.0 - self._parent.meta.geometry['det_offset'][1]
-                self.vol_geom['option']['WindowMaxZ'] = self.vol_geom['GridSliceCount'] / 2.0 - self._parent.meta.geometry['det_offset'][1]
+                #vectors[:,3:6] = vectors[:,3:6] - self._parent.meta.geometry['det_offset'][1] * vectors[:,9:12]
+                vectors[:,0:3] = vectors[:,0:3] + self._parent.meta.geometry['det_offset'][1] * vectors[:,9:12]
+                #self.vol_geom['option']['WindowMinZ'] = -self.vol_geom['GridSliceCount'] / 2.0 - self._parent.meta.geometry['det_offset'][1]
+                self.vol_geom['option']['WindowMinZ'] = -self.vol_geom['GridSliceCount'] / 2.0 + self._parent.meta.geometry['det_offset'][1]*(magnification - 1)
+                #self.vol_geom['option']['WindowMaxZ'] = self.vol_geom['GridSliceCount'] / 2.0 - self._parent.meta.geometry['det_offset'][1]
+                self.vol_geom['option']['WindowMaxZ'] = self.vol_geom['GridSliceCount'] / 2.0 + self._parent.meta.geometry['det_offset'][1]*(magnification - 1)
             
             
             ### Random thermal movements
@@ -1686,7 +1821,7 @@ class reconstruct(subclass):
                     rot_matrix[2,1] = rot_axis[2]*rot_axis[1]*(1.0-c)+rot_axis[0]*s
                     rot_matrix[2,2] = rot_axis[2]*rot_axis[2]*(1.0-c)+c
                     
-                    #Apply rotation matrix for each detector position
+                    #Apply rotation matrix for each detector position  self.W = astra.OpTomo(cfg['ProjectorId'])    
                     vectors[i,6:9] = numpy.dot(rot_matrix, vectors[i,6:9])
                     vectors[i,9:12] = numpy.dot(rot_matrix, vectors[i,9:12])
             
@@ -1729,7 +1864,7 @@ class reconstruct(subclass):
       cfg['option'] = {}
       if short_scan:
           cfg['option']['ShortScan'] = True
-      print(cfg)
+
       if (min_constraint is not None):
           cfg['option']['MinConstraint'] = min_constraint
       
@@ -1775,7 +1910,6 @@ class reconstruct(subclass):
 
       return output #astra.data3d.get(self.rec_id)
   
-    
 
     def _forwardproject(self, x, algorithm = 'FP3D_CUDA'):
 
@@ -1789,13 +1923,11 @@ class reconstruct(subclass):
       try:
           rec_id = astra.data3d.link('-vol', self.vol_geom, x)
           sinogram_id = astra.data3d.link('-sino', self.proj_geom, output)
-    
           cfg['VolumeDataId'] = rec_id
           cfg['ProjectionDataId'] = sinogram_id
-    
+      
           alg_id = astra.algorithm.create(cfg)
     
-          #astra.data3d.store(self.rec_id, x)
           astra.algorithm.run(alg_id, 1)
 
       finally:
