@@ -16,12 +16,12 @@ Simulate makes fake polychromatic x-ray CT data
 import tomobox
 import numpy
 import odl
+import xraylib
 
 class spectra():
     '''
     Simulates spectral phenomena that involve x-ray-matter interaction
     '''
-    import xraylib
     
     @staticmethod
     def total_attenuation(energy, compound):
@@ -125,16 +125,16 @@ class phantom():
     
     @staticmethod     
     def shepp3d(sz = 512):
-        #import tomopy.misc
+        import tomopy.misc
         
-        dim = numpy.array([sz, sz, sz])
-        space = odl.uniform_discr(min_pt = -dim / 2, max_pt = dim / 2, shape=dim, dtype='float32')
+        #dim = numpy.array([sz, sz, sz])
+        #space = odl.uniform_discr(min_pt = -dim / 2, max_pt = dim / 2, shape=dim, dtype='float32')
 
-        x = odl.phantom.transmission.shepp_logan(space)
+        #x = odl.phantom.transmission.shepp_logan(space)
         
-        vol = tomobox.volume(numpy.transpose(x.asarray(), axes = [2, 0, 1])[:,::-1,:])
+        #vol = tomobox.volume(numpy.transpose(x.asarray(), axes = [2, 0, 1])[:,::-1,:])
         
-        #vol = tomobox.volume(tomopy.misc.phantom.shepp3d(sz))
+        vol = tomobox.volume(tomopy.misc.phantom.shepp3d(sz))
         vol.meta.history.add_record('SheppLogan phantom is generated using ODL shepp_logan()', sz)
         
         return vol
@@ -148,8 +148,11 @@ class tomography():
         '''
         Forward projects a volume into a tomogram
         '''
-        tomo.reconstruct._initialize_astra()
-                        
+        # In case the simulated volume is bigger than the detector size:
+        volume_extend = (volume.data.shape[0] - tomo.data.shape[2])
+        
+        tomo.reconstruct._initialize_astra(volume_extend = volume_extend)
+        
         tomo.data._data = tomo.reconstruct._forwardproject(numpy.ascontiguousarray(volume.data._data))
         tomo.meta.history.add_record('simulate.tomography.project was used to generate the data')
         

@@ -426,8 +426,6 @@ def read_image_stack(file):
     #files = sorted(files)
     files = sort_natural(files)
 
-
-    print('********************')
     #print(files)
 
     # Read the first file:
@@ -893,13 +891,18 @@ class io(subclass):
         
             self._parent.meta.geometry.add_thermal_shifts(numpy.array(shifts))
             
-    def save_tiff(self, path = '', fname='data', digits = 4):
+    def save_tiff(self, path = '', fname='data', digits = 4):        
+        self.save_slices(path, fname, digits)
+
+    def save_slices(self, path = '', fname='data', digits = 4):
         '''
         Saves the data to tiff files
         '''
         from PIL import Image
+        
         if self._parent.data._data is not None:
-        # First check if digit is large enough, otherwise add a digit
+            
+            # First check if digit is large enough, otherwise add a digit
             im_nb = self._parent.data._data.shape[0]
             if digits <= numpy.log10(im_nb):
                 digits = int(numpy.log10(im_nb)) + 1
@@ -913,6 +916,30 @@ class io(subclass):
                 fname_tmp += str(i).zfill(digits)
                 fname_tmp += '.tiff'
                 im = Image.fromarray(self._parent.data._data[i,:,:])
+                im.save(fname_tmp)
+                
+    def save_projections(self, path = '', fname='data', digits = 4):
+        '''
+        Saves the data to tiff files
+        '''
+        from PIL import Image
+        
+        if self._parent.data._data is not None:
+        
+            # First check if digit is large enough, otherwise add a digit
+            im_nb = self._parent.data._data.shape[1]
+            if digits <= numpy.log10(im_nb):
+                digits = int(numpy.log10(im_nb)) + 1
+                
+            path = update_path(path, self)
+            fname = os.path.join(path, fname)
+            
+            for i in range(0,self._parent.data._data.shape[1]):
+                fname_tmp = fname
+                fname_tmp += '_'
+                fname_tmp += str(i).zfill(digits)
+                fname_tmp += '.tiff'
+                im = Image.fromarray(numpy.flipud(self._parent.data._data[:,i,:]))
                 im.save(fname_tmp)
                 #misc.imsave(name = os.path.join(path, fname_tmp), arr = self._parent.data._data[i,:,:])
                 #dxchange.writer.write_tiff_stack(self._parent.data.get_data(),fname=os.path.join(path, fname), axis=axis,overwrite=True)
@@ -1508,8 +1535,9 @@ class reconstruct(object):
     vol_geom = None
     proj_geom = None
         
-    def __init__(self, proj):                
-        self.add_projections(proj)
+    def __init__(self, proj):    
+        
+        self._projections = [proj,]           
 
     def add_projections(self, proj):
         '''
@@ -1549,9 +1577,19 @@ class reconstruct(object):
         
         if numpy.size(self._projections) > 1:
             for proj in self._projections[1:]:
-                data.append(proj.data, axis = 1)
+                data = numpy.append(data, proj.data.data, axis = 1)
                 
         return numpy.ascontiguousarray(data)
+        
+    def _total_theta(self):
+        
+        thetas = self._projections[0].meta.geometry.thetas
+
+        if numpy.size(self._projections) > 1:
+            for proj in self._projections[1:]:
+                thetas = numpy.append(thetas, self._projections[0].meta.geometry.thetas)
+                
+        return thetas       
 
     def initialize_projection_mask(self, weight_poisson = False, weight_histogram = None, pixel_mask = None):
         '''
@@ -1592,8 +1630,8 @@ class reconstruct(object):
         if not pixel_mask is None:
             for ii in range(0, sz[1]):
                 self._projection_mask = self._projection_mask[:, ii, :] * pixel_mask
-
-        prnt.message('Projection mask is initialized')
+       
+        #prnt.message('Projection mask is initialized')
 
     def initialize_reconstruction_mask(self):
         '''
@@ -1630,9 +1668,6 @@ class reconstruct(object):
         '''
         Initialize da RayTransform!
         '''
-        
-        prnt = self._parent
-
         sz = self._total_data_shape()
         
         geom = self._projections[0].meta.geometry
@@ -1820,11 +1855,10 @@ class reconstruct(object):
         # Modifiers applied... Extend the volume if needed                    
         return vectors
             
-    def _initialize_astra(self, sz = None, det_pixel = None, 
-                          det2obj = None, src2obj = None, theta = None, vec_geom = False):
+    def _initialize_astra(self, volume_extend = 0):
 
         # Shape of the thotal projection data:
-        if sz is None: sz = self._total_data_shape()
+        sz = self._total_data_shape()
         
         # Calculate the size of the reconstruction volume based on geometry modifier values:
         vrt_shift = 0
@@ -1834,33 +1868,43 @@ class reconstruct(object):
             hrz_shift = numpy.max([hrz_shift, proj.meta.geometry.origin_shift()[0]])
             vrt_shift = numpy.max([vrt_shift, proj.meta.geometry.origin_shift()[1]]) 
         
-        # Convert to pixels:
-        hrz_shift = hrz_shift / self._projections[0].meta.geometry.img_pixel[0]
-        vrt_shift = vrt_shift / self._projections[0].meta.geometry.img_pixel[1]
-        
         # Decide on the detector and volume size:
         det_count_x = sz[2]
         det_count_z = sz[0]
     
         # Make volume count x > detector count to include corneres of the object:
-        vol_count_x = sz[2] + hrz_shift
-        vol_count_z = sz[0] + vrt_shift
+        if volume_extend == 0:    
+            vol_count_x = numpy.int(sz[2] + hrz_shift * 2)
+            vol_count_z = numpy.int(sz[0] + vrt_shift * 2)
+        else:
+            vol_count_x = numpy.int(sz[2] + volume_extend)
+            vol_count_z = numpy.int(sz[0] + volume_extend)
 
+        # Assuming that all img pixels are the same for now:
+        img_pixel = self._projections[0].meta.geometry.img_pixel
+        
         # Initialize the volume geometry:
-        self.vol_geom = astra.create_vol_geom(vol_count_x, vol_count_x, vol_count_z)
+        minx = -vol_count_x // 2 * img_pixel[0]
+        maxx = +vol_count_x // 2 * img_pixel[0]
+        miny = -vol_count_x // 2 * img_pixel[0]
+        maxy = +vol_count_x // 2 * img_pixel[0]
+        minz = -vol_count_z // 2 * img_pixel[1]
+        maxz = +vol_count_z // 2 * img_pixel[1]
+
+        self.vol_geom = astra.create_vol_geom(vol_count_x, vol_count_x, vol_count_z, minx, maxx, miny, maxy, minz, maxz)
         
         total_vectors = numpy.zeros((0,12))
         
         for proj in self._projections:
-            if det_pixel is None: det_pixel = proj.meta.geometry.det_pixel
-            if det2obj is None: det2obj = proj.meta.geometry.det2obj
-            if src2obj is None: src2obj = proj.meta.geometry.src2obj
-            if theta is None: theta = proj.meta.geometry.thetas
+            det_pixel = proj.meta.geometry.det_pixel
+            det2obj = proj.meta.geometry.det2obj
+            src2obj = proj.meta.geometry.src2obj
+            theta = proj.meta.geometry.thetas
 
-            M = proj.meta.geometry.magnification
+            #M = proj.meta.geometry.magnification        
 
             # Initialize the local projection geometry and stitch it later with other geometries:          
-            proj_geom = astra.create_proj_geom('cone', det_pixel[1], det_pixel[0], det_count_z, det_count_x, theta, (src2obj), (det2obj))
+            proj_geom = astra.create_proj_geom('cone', det_pixel[1], det_pixel[0], det_count_z, det_count_x, theta, src2obj, det2obj)
         
             # Convert proj_geom to vectors and apply modifiers:
             vectors = self._modifiers2vectors(proj_geom, proj.meta.geometry)
@@ -1896,11 +1940,14 @@ class reconstruct(object):
 
       self._projection_filter = numpy.matlib.repmat(filt, sz[1], 1)
       
-    def _backproject(self, y, algorithm = 'FDK_CUDA', iterations=1, min_constraint = None, short_scan=False):
+    def _backproject(self, y, algorithm = 'FDK_CUDA', iterations=1, min_constraint = None):
 
       cfg = astra.astra_dict(algorithm)
       cfg['option'] = {}
-      if short_scan:
+
+      theta = self._total_theta()
+      
+      if (algorithm == 'FDK_CUDA') & ((theta.max() - theta.min()) < (numpy.pi * 2)) :
           cfg['option']['ShortScan'] = True
       
       if (min_constraint is not None):
@@ -1945,7 +1992,9 @@ class reconstruct(object):
 
       finally:
           astra.algorithm.delete(alg_id)
-          astra.data3d.delete([rec_id, sinogram_id])
+          #astra.data3d.delete([rec_id, sinogram_id])
+          astra.data3d.delete(rec_id)
+          astra.data3d.delete(sinogram_id)
 
       return output #astra.data3d.get(self.rec_id)
   
@@ -1961,14 +2010,11 @@ class reconstruct(object):
       sinogram_id = []
       alg_id = []
       
-      try:
-          print('*******************')
-          print(x.shape)
-          print(self.vol_geom)
-          
+      try:          
           rec_id = astra.data3d.link('-vol', self.vol_geom, x)
+          
           sinogram_id = astra.data3d.link('-sino', self.proj_geom, output)
-    
+              
           cfg['VolumeDataId'] = rec_id
           cfg['ProjectionDataId'] = sinogram_id
     
@@ -1978,35 +2024,32 @@ class reconstruct(object):
           astra.algorithm.run(alg_id, 1)
 
       finally:
-          astra.data3d.delete([rec_id, sinogram_id])
+          #astra.data3d.delete([rec_id, sinogram_id])
           astra.algorithm.delete(alg_id)
+          
+          astra.data3d.delete(rec_id)
+          astra.data3d.delete(sinogram_id)
 
       return output
 
-    def FDK(self, short_scan = None):
+    def FDK(self):
         '''
         FDK reconstruction based on ASTRA.
         '''
-        prnt = self._parent
 
         # Initialize ASTRA:
         self._initialize_astra()
 
         # Run the reconstruction:
-        #epsilon = numpy.pi / 180.0 # 1 degree - I deleted a part of code here by accident...
-        theta = self._parent.meta.geometry.thetas
-        if short_scan is None:
-            short_scan = (theta.max() - theta.min()) < (numpy.pi * 1.99)
-        
-        vol = self._backproject(self._total_data(), algorithm='FDK_CUDA', short_scan = short_scan)
+        vol = self._backproject(self._total_data(), algorithm='FDK_CUDA')
         
         # Reconstruction mask is applied only in native ASTRA SIRT. Apply it here:
         if not self._reconstruction_mask is None:
             vol = self._reconstruction_mask * vol
         
         vol = volume(vol)
-        #vol.history['FDK'] = 'generated in '
-        self._parent.meta.history.add_record('set data.data', [])
+        
+        vol.meta.history.add_record('set data.data', [])
         return vol
         # No need to make a history record - sinogram is not changed.
 
@@ -2014,7 +2057,6 @@ class reconstruct(object):
     def SIRT(self, iterations = 10, min_constraint = None):
         '''
         '''
-        prnt = self._parent
 
         # Initialize ASTRA:
         self._initialize_astra()
@@ -2050,7 +2092,7 @@ class reconstruct(object):
         for ii_iter in range(iterations):
             fwd_proj_vols = self._forwardproject(vol)
 
-            residual = (prnt.data.data - fwd_proj_vols) * weights
+            residual = (self._total_data() - fwd_proj_vols) * weights
 
             if not self._projection_mask is None:
                 residual *= self._projection_mask
@@ -2107,8 +2149,6 @@ class reconstruct(object):
         '''
         
         '''
-        prnt = self._parent
-
         # Initialize ASTRA:
         self._initialize_astra()
 
@@ -2175,6 +2215,8 @@ class reconstruct(object):
         # Initialize ASTRA:
         sz = self._total_data_shape()
         
+        prnt = self._projections[0]
+        
         pixel_size = prnt.meta.geometry.det_pixel
         det2obj = prnt.meta.geometry.det2obj
         src2obj = prnt.meta.geometry.src2obj
@@ -2203,7 +2245,6 @@ class reconstruct(object):
 # **************************************************************
 #           VOLUME class and subclasses
 # **************************************************************
-from scipy import ndimage
 from skimage import morphology
 
 class postprocess(subclass):
@@ -2349,9 +2390,18 @@ class projections(object):
 
     def copy(self):
         '''
-        Deep copy of the sinogram object:
+        Deep copy of the projections object:
         '''
-        return copy.deepcopy(self)
+        
+        # Create a new projctions object to avoid copying pointers to data that is contained in the old object
+        proj = projections()
+        
+        # Here hopefully reconstruct will not have links with the old data object
+        
+        proj.meta = copy.deepcopy(self.meta)
+        proj.data = copy.deepcopy(self.data)
+        
+        return proj
 
     def _pronounce_wisdom(self):
 
