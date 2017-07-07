@@ -238,7 +238,7 @@ class geometry(subclass):
         
     @img_pixel.setter
     def img_pixel(self, img_pixel):
-        self._det_pixel = img_pixel * self.magnification        
+        self._det_pixel = [img_pixel[0] * self.magnification, img_pixel[1] * self.magnification]         
         
     @property
     def det_size(self):
@@ -253,6 +253,10 @@ class geometry(subclass):
     def thetas(self):
         dt = 1#self._parent._data_sampling
         
+        if self._parent.data.shape[1] != numpy.shape(self._thetas[::dt]):
+            self._parent.warning('Length of thetas array is not consistent with the data shape! Will try to initialize thetas using the data shape.')
+            self.init_thetas(theta_n = self._parent.data.shape[1])
+            
         return numpy.array(self._thetas[::dt])
         
     @thetas.setter
@@ -272,8 +276,10 @@ class geometry(subclass):
     @theta_range.setter    
     def theta_range(self, theta_range):
         # Change the theta range:
-        if self.thetas.size() > 2:
-            self.thetas = numpy.linspace(theta_range[0], theta_range[1], self._thetas.size())
+        len = numpy.size(self.thetas)     
+        
+        if len > 2:
+            self.thetas = numpy.linspace(theta_range[0], theta_range[1], len)
         else:
             self.thetas = [theta_range[0], theta_range[1]]
         
@@ -283,11 +289,11 @@ class geometry(subclass):
         
     def init_thetas(self, theta_range = [], theta_n = 2):
         # Initialize thetas array. You can first initialize with theta_range, and add theta_n later.
-        self.thetas = numpy.linspace(theta_range[0], theta_range[1], theta_n)
-        
         if theta_range == []:
-            self.thetas = numpy.linspace(self.thetas[0], self.thetas[-1], theta_n)
-
+            self._thetas = numpy.linspace(self._thetas[0], self._thetas[-1], theta_n)
+        else:    
+            self._thetas = numpy.linspace(theta_range[0], theta_range[1], theta_n)
+        
 # **************************************************************
 #           META class and subclasses
 # **************************************************************
@@ -563,7 +569,7 @@ class io(subclass):
         self._parent.data._data = numpy.transpose(self._parent.data._data, (1, 0, 2))
         self._parent.data._data = numpy.flipud(self._parent.data._data)
         self._parent.data._data = numpy.ascontiguousarray(self._parent.data._data, dtype=numpy.float32)
-
+        
         # add record to the history:
         self._parent.meta.history.add_record('io.read_raw', path)
 
@@ -755,20 +761,24 @@ class io(subclass):
                 geom_key = [geom_dict[key] for key in geom_dict.keys() if key in name]
 
                 if geom_key != []:
-                    factor = self._parse_unit(name)
+                    #factor = self._parse_unit(name)
+                    factor = 1 # there are no units mentioned in flexray file
                     records[geom_key[0]] = float(var)*factor
 
         # Convert the geometry dictionary to geometry object:        
         self._parent.meta.geometry.src2obj = records['src2obj']
-        self._parent.meta.geometry.det2obj = records['det2obj']
-        self._parent.meta.geometry.img_pixel = [records['img_pixel'], records['img_pixel']] * self._parse_unit('um') 
-        self._parent.meta.geometry.theta_range = [records['first_angle'], records['last_angle']] * self._parse_unit('deg')
+        self._parent.meta.geometry.det2obj = records['src2det'] - records['src2obj']
+        self._parent.meta.geometry.img_pixel = [records['img_pixel'] * self._parse_unit('um'), records['img_pixel'] * self._parse_unit('um')]  
+        self._parent.meta.geometry.theta_range = [records['first_angle']* self._parse_unit('deg'), records['last_angle']* self._parse_unit('deg')] 
         
+        if self._parent.data.data.size > 0:                                              
+            self._parent.meta.geometry.init_thetas(theta_n = self._parent.data.shape[1])
+
         # Set some physics properties:
-        self._parent.meta.physics['voltage'] = records['voltage']
-        self._parent.meta.physics['power'] = records['power']
-        self._parent.meta.physics['current'] = records['current']
-        self._parent.meta.physics['current'] = records['exposure']
+        self._parent.meta.physics['voltage'] = records.get('voltage')
+        self._parent.meta.physics['power'] = records.get('power')
+        self._parent.meta.physics['current'] = records.get('current')
+        self._parent.meta.physics['current'] = records.get('exposure')
 
     def _parse_skyscan_meta(self, path = ''):
 
@@ -853,7 +863,7 @@ class io(subclass):
             units_dictionary = {'um':0.001, 'mm':1, 'cm':10.0, 'm':1e3, 'rad':1, 'deg':numpy.pi / 180.0, 'ms':1, 's':1e3, 'us':0.001, 'kev':1, 'mev':1e3, 'ev':0.001,
                                 'kv':1, 'mv':1e3, 'v':0.001, 'ua':1, 'ma':1e3, 'a':1e6, 'line':1}    
             
-            if unit in units_dictionary.keys:
+            if unit in units_dictionary.keys():
                 factor = units_dictionary[unit]
             else:
                 factor = 1
@@ -1160,12 +1170,14 @@ class process(subclass):
 
         self._parent.message('Arbitrary function applied.')
 
-    def pixel_calibration(self, kernel=5):
+    def pixel_calibration(self, kernel=[5, 5]):
         '''
         Apply correction to miscalibrated pixels.
         '''
         # Compute mean image of intensity variations that are < 5x5 pixels
-        res = self._parent.data.data - ndimage.filters.median_filter(self._parent.data.data, [kernel, 1, kernel])
+        self._parent.message('Starting pixel callibration. This can take some time, depending on the kernel size.')
+        
+        res = self._parent.data.data - ndimage.filters.median_filter(self._parent.data.data, [kernel[1], 1, kernel[0]])
         res = res.mean(1)
         self._parent.data.data -= res.reshape((res.shape[0], 1, res.shape[1]))
         self._parent.meta.history.add_record('Pixel calibration', 1)
@@ -1402,7 +1414,7 @@ class process(subclass):
 # **************************************************************
 #           OPTIMIZE class and subclasses
 # **************************************************************
-from scipy import optimize
+from scipy import optimize as op
 from scipy.optimize import minimize_scalar
 
 class optimize(subclass):
@@ -1486,12 +1498,12 @@ class optimize(subclass):
             self._parent._data_sampling = subscale
             
             # Create a ramp filter so FDK will calculate a gradient:
-            self._initialize_ramp_filter(power = 2)
+            self._parent.reconstruct._initialize_ramp_filter(power = 2)
                             
             if full_search:
                 guess = self._full_search(self._modifier_l2cost, bounds = [guess / subscale - 2, guess / subscale + 2], maxiter = 5, args = modifier) * subscale
             else:                    
-                opt = optimize.minimize(self._modifier_l2cost, x0 = guess / subscale, bounds = ((guess / subscale - 2, guess / subscale + 2),), method='COBYLA', 
+                opt = op.minimize(self._modifier_l2cost, x0 = guess / subscale, bounds = ((guess / subscale - 2, guess / subscale + 2),), method='COBYLA', 
                                         options = {'maxiter': 15, 'disp': False}, args = modifier)
                 
                 guess = opt.x * subscale
@@ -1504,7 +1516,7 @@ class optimize(subclass):
             subscale = subscale // 2
             
         self._parent._data_sampling = 1    
-        self._initialize_ramp_filter(power = 1)    
+        self._parent.reconstruct._initialize_ramp_filter(power = 1)    
         
         return guess
         
@@ -1910,7 +1922,11 @@ class reconstruct(object):
             vectors = self._modifiers2vectors(proj_geom, proj.meta.geometry)
             
             # Extend vectors:
+            print('***')
+            print(vectors.shape)
             total_vectors = numpy.append(total_vectors, vectors, axis=0) 
+            print('+++')
+            print(total_vectors.shape)
             
         # Make a new geometry based on the total vector:    
         self.proj_geom = astra.create_proj_geom('cone_vec', det_count_z, det_count_x, total_vectors)    
@@ -1959,6 +1975,10 @@ class reconstruct(object):
       alg_id = []
       
       try:
+          print('///')
+          print(self.proj_geom)
+          print(numpy.shape(self.proj_geom['Vectors']))
+          print(y.shape)
           rec_id = astra.data3d.link('-vol', self.vol_geom, output)
           sinogram_id = astra.data3d.link('-sino', self.proj_geom, y)
     
