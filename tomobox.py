@@ -961,10 +961,23 @@ class display(subclass):
     '''
     This is a collection of display tools for the raw and reconstructed data
     '''
+    
     def __init__(self, parent = []):
         subclass.__init__(self, parent)
         
         self._cmap = 'gray'
+        self._dynamic_range = []
+        self._mirror = False
+        self._upsidedown = False
+        
+    def set_options(cmap = cmap, dynamic_range = []. mirror = False, upsidedown = False):    
+        '''
+        Set options for visualization.
+        '''
+        self._cmap = cmap
+        self._dynamic_range = dynamic_range
+        self._mirror = mirror
+        self._upsidedown = upsidedown
 
     def _figure_maker_(self, fig_num):
         '''
@@ -983,13 +996,14 @@ class display(subclass):
         self._figure_maker_(fig_num)
 
         if slice_num is None:
-            slice_num = self._parent.data.shape[0] // 2
+            slice_num = self._parent.data.shape[dim_num] // 2
 
         img = extract_2d_array(dim_num, slice_num, self._parent.data.data)
 
         if mirror: img = numpy.fliplr(img)
         if upsidedown: img = numpy.flipud(img)
-        plt.imshow(img, cmap = self._cmap, origin='lower')
+        
+        plt.imshow(img, cmap = self._cmap, origin='lower', vmin = dynamic_range[0], vmax = dynamic_range[1])
         plt.colorbar()
         plt.show()
 
@@ -1476,13 +1490,31 @@ class optimize(subclass):
         ii = 0
         for val in space:
             func_values[ii] = func(val, modifier = args)
-            ii += 1
+            ii += 1           
         
         min_index = func_values.argmin()    
         
         return reconstruct._parabolic_min(func_values, min_index, space)
+    
+    def optimize_rotation_center(self, guess = 0, subscale = 1, full_search = True, center_of_mass = True):
+        '''
+        Find a center of rotation. If you can, use the center_of_mass option to get the initial guess. 
+        If that fails - use a subscale larger than the potential deviation from the center. Usually, 8 or 16 works fine!
+        '''
+        # Usually a good initial guess is the center of mass of the projection data:
+        if  center_of_mass:   
+            guess = self._parent.analyse.center_of_mass()[1] - self._parent.data.shape[2] // 2
+            print('The initial guess for the rotation axis shift is %02.2f', guess)
+        else:
+            guess = 0
+
+        guess = self.optimize_geometry_modifier(modifier = 'rotation_axis', guess = guess, subscale = subscale, full_search = full_search)
         
-    def optimize_geometry_modifier(self, modifier = 'rotation_axis', guess = 0, subscale = 8, full_search = False):
+        self._parent.meta.geometry.rotation_axis_shift(guess)
+        
+        return guess
+        
+    def optimize_geometry_modifier(self, modifier = 'rotation_axis', guess = 0, subscale = 8, full_search = True):
         '''
         Maximize the sharpness of the reconstruction by optimizing one of the geometry modifiers:
         '''
@@ -1922,11 +1954,7 @@ class reconstruct(object):
             vectors = self._modifiers2vectors(proj_geom, proj.meta.geometry)
             
             # Extend vectors:
-            print('***')
-            print(vectors.shape)
             total_vectors = numpy.append(total_vectors, vectors, axis=0) 
-            print('+++')
-            print(total_vectors.shape)
             
         # Make a new geometry based on the total vector:    
         self.proj_geom = astra.create_proj_geom('cone_vec', det_count_z, det_count_x, total_vectors)    
@@ -1975,10 +2003,6 @@ class reconstruct(object):
       alg_id = []
       
       try:
-          print('///')
-          print(self.proj_geom)
-          print(numpy.shape(self.proj_geom['Vectors']))
-          print(y.shape)
           rec_id = astra.data3d.link('-vol', self.vol_geom, output)
           sinogram_id = astra.data3d.link('-sino', self.proj_geom, y)
     
@@ -2002,7 +2026,7 @@ class reconstruct(object):
     
               sz = self._projection_filter.shape
     
-              slice_proj_geom = astra.create_proj_geom('parallel', 1.0, sz[1], self._parent.meta.geometry.thetas)
+              slice_proj_geom = astra.create_proj_geom('parallel', 1.0, sz[1], self._total_theta())
     
               filt_id = astra.data2d.link('-sino', slice_proj_geom, self._projection_filter)
               cfg['option']['FilterSinogramId'] = filt_id
