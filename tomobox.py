@@ -196,6 +196,9 @@ class geometry(subclass):
         hrz = numpy.max([numpy.abs(hrz + self.modifiers['vol_x_tra']), hrz + numpy.abs(self.modifiers['vol_y_tra'])])
         vrt += self.modifiers['vol_z_tra']
         
+        print('origin shift')
+        print([hrz, vrt])
+        
         return [hrz, vrt]
     
     # Set/Get methods (very bodring part of code but, hopefully, it will make geometry look prettier from outside):       
@@ -970,7 +973,7 @@ class display(subclass):
         self._mirror = False
         self._upsidedown = False
         
-    def set_options(cmap = cmap, dynamic_range = []. mirror = False, upsidedown = False):    
+    def set_options(self, cmap = 'gray', dynamic_range = [], mirror = False, upsidedown = False):    
         '''
         Set options for visualization.
         '''
@@ -1003,7 +1006,8 @@ class display(subclass):
         if mirror: img = numpy.fliplr(img)
         if upsidedown: img = numpy.flipud(img)
         
-        plt.imshow(img, cmap = self._cmap, origin='lower', vmin = dynamic_range[0], vmax = dynamic_range[1])
+        #plt.imshow(img, cmap = self._cmap, origin='lower', vmin = self._dynamic_range[0], vmax =self._dynamic_range[1])
+        plt.imshow(img, cmap = self._cmap, origin='lower')
         plt.colorbar()
         plt.show()
 
@@ -1304,9 +1308,11 @@ class process(subclass):
         self._parent.message('Short scan correction applied.')
 
 
-    def log(self, air_intensity = 1.0, lower_bound = -10, upper_bound = numpy.log(256)):
+    def log(self, air_intensity = 1.0, lower_bound = -numpy.log(2), upper_bound = numpy.log(2**12)):
         '''
-        Apply -log(x) to the sinogram
+        Apply -log(x) to the sinogram. Lower and upper bounds are given for the attenuation coefficient.
+        Default upper_bound assumes that values below 1/2^12 are outside of the dynamic range of the camera.
+        Lover bound of - log(2) means there should be no intensity values higher than 2 after normalization.
         '''
         # Check if the log was already applied:
         #self._parent._check_double_hist('process.log(upper_bound)')
@@ -1315,14 +1321,14 @@ class process(subclass):
         if (air_intensity != 1.0):
             self._parent.data.data /= air_intensity
             
+        # Apply a bound to large values:
+        numpy.clip(self._parent.data.data, a_min = numpy.exp(-upper_bound), a_max = numpy.exp(-lower_bound), out = self._parent.data.data)
+                   
         # In-place negative logarithm
         numpy.log(self._parent.data.data, out = self._parent.data.data)
         numpy.negative(self._parent.data.data, out = self._parent.data.data)
         self._parent.data.data = numpy.float32(self._parent.data.data)
         
-        # Apply a bound to large values:
-        numpy.clip(self._parent.data.data, a_min = lower_bound, a_max = upper_bound, out = self._parent.data.data)
-
         self._parent.message('Logarithm is applied.')
         self._parent.meta.history.add_record('process.log(upper_bound)', upper_bound)
 
@@ -1487,8 +1493,13 @@ class optimize(subclass):
         
         space = numpy.linspace(bounds[0], bounds[1], maxiter)
         
+        print('Starting a full search')
+        
         ii = 0
         for val in space:
+            
+            print('Iteration %0d' % ii)
+            
             func_values[ii] = func(val, modifier = args)
             ii += 1           
         
@@ -1504,7 +1515,7 @@ class optimize(subclass):
         # Usually a good initial guess is the center of mass of the projection data:
         if  center_of_mass:   
             guess = self._parent.analyse.center_of_mass()[1] - self._parent.data.shape[2] // 2
-            print('The initial guess for the rotation axis shift is %02.2f', guess)
+            print('The initial guess for the rotation axis shift is %0.2f' % guess)
         else:
             guess = 0
 
@@ -1520,12 +1531,12 @@ class optimize(subclass):
         '''
         
         self._parent.message('Optimization is started...')
-        self._parent.message('Initial guess is %01f' % guess)
+        self._parent.message('Initial guess is %0.2f' % guess)
         
         # Downscale the data:
         while subscale >= 1:
             
-            self._parent.message('Subscale factor %01d' % subscale)
+            self._parent.message('Subscale factor %1d' % subscale)
             
             self._parent._data_sampling = subscale
             
@@ -1540,7 +1551,7 @@ class optimize(subclass):
                 
                 guess = opt.x * subscale
             
-            self._parent.message('Current guess is %01f' % guess)
+            self._parent.message('Current guess is %0.2f' % guess)
             
             vol = self._parent.reconstruct.FDK()
             vol.display.slice()
