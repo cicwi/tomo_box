@@ -49,15 +49,17 @@ class history():
         return self._records.copy()
         
     def __init__(self):
+        
+        self._records = []
         self.add_record('Created')
     
-    def add_record(self, operation = '', properties = []):
+    def add_record(self, operation = '', properties = None):
         
         # Add a new history record:
         timestamp = time.ctime()
         
         # Add new record:
-        self._records.append([operation, properties, timestamp, numpy.size(self._records) ])
+        self._records.append([operation, properties, timestamp, numpy.shape(self._records)[0] ])
     
     @property
     def keys(self):
@@ -196,9 +198,6 @@ class geometry(subclass):
         hrz = numpy.max([numpy.abs(hrz + self.modifiers['vol_x_tra']), hrz + numpy.abs(self.modifiers['vol_y_tra'])])
         vrt += self.modifiers['vol_z_tra']
         
-        print('origin shift')
-        print([hrz, vrt])
-        
         return [hrz, vrt]
     
     # Set/Get methods (very bodring part of code but, hopefully, it will make geometry look prettier from outside):       
@@ -264,7 +263,7 @@ class geometry(subclass):
         
     @thetas.setter
     def thetas(self, thetas):
-        dt = self._parent._data_sampling
+        dt = 1 #self._parent._data_sampling
         
         self._thetas[::dt] = numpy.array(thetas)
     
@@ -338,32 +337,80 @@ class data(subclass):
     # Get/Set methods:
     @property
     def data(self):
-        dx = self._parent._data_sampling
+        dx = self._parent._data_sampling[1]
+        dz = self._parent._data_sampling[0]
         dt = 1#self._parent._data_sampling
         
         if dx + dt > 2:
-            return numpy.ascontiguousarray(self._data[::dx, ::dt, ::dx])
+            return numpy.ascontiguousarray(self._data[::dz, ::dt, ::dx])
         else:
             return self._data
         
     @data.setter
     def data(self, data):
-        dx = self._parent._data_sampling
+        dx = self._parent._data_sampling[1]
+        dz = self._parent._data_sampling[0]
         dt = 1#self._parent._data_sampling
         
         if self._backup_update:
             self._parent.io.save_backup()
             
-        self._data[::dx, ::dt, ::dx] = data
+        self._data[::dz, ::dt, ::dx] = data
         
         self._parent.meta.history.add_record('set data.data', [])
         
+    def get_ref(self, proj_num = 0):
+        '''
+        Returns a reference image. Interpolated if sefveral reference images are available.
+        '''
+        
+        # Return reference image for the current projection:
+        if self._ref.ndim > 2:
+           
+            if self._data == None:
+                self._parent.warning('No raw data available. We don`t know how many projections there are in order to interpolate the reference image properly. Read raw data first.')
+                dsz = self._ref.shape[1]
+
+            else:
+                dsz = self.data.shape[1]
+                
+            # Several flat field images are available:
+            ref = self._ref
+           
+            sz = ref.shape
+
+            # This implementation is too slow:
+            #proj_index = numpy.linspace(0, dsz-1, sz[1])
+            #interp_grid  = numpy.array(numpy.meshgrid(numpy.arange(sz[0]), proj_num, numpy.arange(sz[2])))
+            #interp_grid = numpy.transpose(interp_grid, (2,1,3,0))
+            #original_grid = (numpy.arange(sz[0]), proj_index, numpy.arange(sz[2]))
+            #return interp_sc.interpn(original_grid, ref, interp_grid) 
+            
+            proj_index = numpy.linspace(0, sz[1]-1, dsz)
+            
+            a = proj_index[proj_num]
+            fract = a - numpy.floor(a)            
+            a = numpy.floor(a)            
+            
+            if a < (dsz-1): 
+                b = numpy.ceil(proj_index[proj_num])
+            else: 
+                b = a
+                
+            return self._ref[:, a, :] * (1 - fract) + self._ref[:, b, :] * fract
+           
+        else:
+            
+           # One flat field image is available: 
+           return self._ref   
+        
     @property        
     def shape(self):
-        dx = self._parent._data_sampling
+        dx = self._parent._data_sampling[1]
+        dz = self._parent._data_sampling[0]
         dt = 1#self._parent._data_sampling
         
-        return self._data[::dx, ::dt, ::dx].shape
+        return self._data[::dz, ::dt, ::dx].shape
         
     @property            
     def size_mb(self):
@@ -377,13 +424,26 @@ class data(subclass):
         '''
         Use interpolation to get a projection at a given theta
         '''
-        sz = self.shape
         thetas = self._parent.meta.geometry.thetas
 
-        interp_grid = numpy.transpose(numpy.meshgrid(target_theta, numpy.arange(sz[0]), numpy.arange(sz[2])), (1,2,3,0))
-        original_grid = (numpy.arange(sz[0]), thetas, numpy.arange(sz[2]))
-
-        return interp_sc.interpn(original_grid, self.data, interp_grid)
+        if (target_theta > thetas.max()) |(target_theta < thetas.min()):
+            self._parent.error('Theta is out of range!')
+            
+        # Interpolation is too slow:
+        #interp_grid = numpy.transpose(numpy.meshgrid(target_theta, numpy.arange(sz[0]), numpy.arange(sz[2])), (1,2,3,0))
+        #original_grid = (numpy.arange(sz[0]), thetas, numpy.arange(sz[2]))
+        #return interp_sc.interpn(original_grid, self.data, interp_grid)
+        
+        a = numpy.sum(thetas < target_theta)
+        
+        fract = target_theta - thetas[a]
+        if a < (thetas.size -1):
+            b = a + 1
+        else:
+            b = a
+            
+        return self.data[:, a, :] * (1 - fract) + self.data[:, b, :] * fract
+        
 
 # **************************************************************
 #           IO class and subroutines
@@ -576,21 +636,33 @@ class io(subclass):
         # add record to the history:
         self._parent.meta.history.add_record('io.read_raw', path)
 
-    def read_ref(self, path_file):
+    def read_ref(self, path_files):
         '''
-        Read reference flat field.
+        Read reference flat field. Can specify a single file path or an array with several files.
 
         '''
-        ref  = misc.imread(path_file, flatten= 0)
+        ref = []
 
-        if self._parent:
-            self._parent.data._ref = ref
+        if type(path_files) == str:
+            ref  = numpy.flipud(misc.imread(path_files, flatten= 0))
+            
+        elif type(path_files) == list:
+            for file in path_files:
+                ref.append(numpy.flipud(misc.imread(file, flatten= 0)))   
+                
+        else:
+            self._parent.error('path_files parameter in read_ref() should be iether a full file name or a list of file names')
+            
+        # Swap the axses for ASTRA:
+        ref = numpy.transpose(ref, [1,0,2])    
+
+        self._parent.data._ref = ref
 
         # Cast to float to avoid problems with divisions in the future:
         self._parent.data._ref = numpy.float32(self._parent.data._ref)
 
         # add record to the history:
-        self._parent.meta.history.add_record('io.read_ref', path_file)
+        self._parent.meta.history.add_record('io.read_ref', path_files)
 
         self._parent.message('Flat field reference image loaded.')
         
@@ -602,13 +674,13 @@ class io(subclass):
         dark = misc.imread(path_file, flatten= 0)
 
         if self._parent:
-            self._parent.data._dark = dark
+            self._parent.data._dark =numpy.flipud(dark)
 
         # Cast to float to avoid problems with divisions in the future:
         self._parent.data._dark = numpy.float32(self._parent.data._dark)
 
         # add record to the history:
-        self._parent.meta.history.add_record('io.read_ref', path_file)
+        self._parent.meta.history.add_record('io.read_dark', path_file)
 
         self._parent.message('Flat field reference image loaded.')    
 
@@ -1242,27 +1314,31 @@ class process(subclass):
             self._parent.data.data = self._parent.data.data / air_values
             
             # add a record to the history: 
-            self._parent.meta.history.add_record('process.flat_field', 1)
+            self._parent.meta.history.add_record('process.flat_field', 'skyscan')
 
             self._parent.message('Skyscan flat field correction applied.')
 
         else:
-            if numpy.min(self._parent.data._ref) <= 0:
-                self._parent.warning('Flat field reference image contains zero (or negative) values! Will replace those with little tiny numbers.')
+            # Treat projections separately, to save memory:
+            for ii in range(0, self._parent.data.shape[1]):
+                
+                # Get the reference image for the current projection:
+                ref = self._parent.data.get_ref(proj_num = ii)
+                
+                if numpy.min(ref) <= 0:
+                    self._parent.warning('Flat field reference image contains zero (or negative) values! Will replace those with little tiny numbers.')
 
-                tiny = self._parent.data._ref[self._parent.data._ref > 0].min()
-                self._parent.data._ref[self._parent.data._ref <= 0] = tiny
+                    tiny = ref[ref > 0].min()
+                    ref[ref <= 0] = tiny
 
-            # How many projections:
-            n_proj = self._parent.data.shape[1]
-
-            if not self._parent.data._dark is None:
-                for ii in range(0, n_proj):
-                    self._parent.data.data[:, ii, :] = (self._parent.data.data[:, ii, :] - self._parent.data._dark) / (self._parent.data._ref - self._parent.data._dark)
-            else:
-                for ii in range(0, n_proj):
-                    self._parent.data.data[:, ii, :] = (self._parent.data.data[:, ii, :]) / (self._parent.data._ref)
-
+                # If there is dark field, use it.
+                if not self._parent.data._dark is None:    
+                    self._parent.data.data[:, ii, :] = self._parent.data.data[:, ii, :] - self._parent.data._dark
+                    ref = ref - self._parent.data._dark
+                    
+                # Use flat field:
+                self._parent.data.data[:, ii, :] = self._parent.data.data[:, ii, :] / ref    
+            
             # add a record to the history:
             self._parent.meta.history.add_record('process.flat_field', 1)
 
@@ -1330,7 +1406,7 @@ class process(subclass):
         self._parent.data.data = numpy.float32(self._parent.data.data)
         
         self._parent.message('Logarithm is applied.')
-        self._parent.meta.history.add_record('process.log(upper_bound)', upper_bound)
+        self._parent.meta.history.add_record('process.log(air_intensity, bounds)', [air_intensity, lower_bound, upper_bound])
 
     def salt_pepper(self, kernel = 3):
         '''
@@ -1385,18 +1461,50 @@ class process(subclass):
     def bin_data(self, bin_theta = True):
         '''
         Bin data with a factor of two
+        Outdated!!! Use _data_sampling in property in reconstruction.
+        '''
         '''
         self._parent.data._data = (self._parent.data._data[:, :, 0:-1:2] + self._parent.data._data[:, :, 1::2]) / 2
         self._parent.data._data = (self._parent.data._data[0:-1:2, :, :] + self._parent.data._data[1::2, :, :]) / 2
 
         self._parent.meta.geometry.det_pixel *= 2
         
-        '''
-        Bin angles with a factor of two
-        '''
+        #Bin angles with a factor of two
+        
         if bin_theta:
             self._parent.data._data = (self._parent.data._data[:,0:-1:2,:] + self._parent.data._data[:,1::2,:]) / 2
             self._parent.meta.geometry.thetas = numpy.array(self._parent.meta.geometry.thetas[0:-1:2] + self._parent.meta.geometry.thetas[1::2]) / 2
+        '''
+        pass
+        
+    def auto_crop(self, threshold = 0.01):
+        '''
+        Crops projection data living only the area that is > than the maximum * threshold
+        '''
+        
+        if 'process.log(air_intensity, bounds)' in self._parent.meta.history.keys:
+            
+            # Project along the theta dimension and apply threshold:
+            proj = self._parent.data.data.sum(1)
+            proj = proj > proj.max() * threshold
+
+            # Project vertically and horizontally:
+            xproj = proj.max(0)
+            yproj = proj.max(1)
+            
+            # Convert projections to indexes:
+            xproj = numpy.where(xproj > 0)
+            yproj = numpy.where(yproj > 0)
+            
+            crop_length_x = numpy.min([xproj[0], self._parent.data._data.shape[2]-1 - xproj[-1]])
+            crop_length_y = numpy.min([yproj[0], self._parent.data._data.shape[0]-1 - yproj[-1]])
+            
+            print('We decided to crop in x and y: ', [crop_length_x, crop_length_y])
+            
+            self.crop([crop_length_y, crop_length_x], [crop_length_y, crop_length_x])
+            
+        else:
+            self._parent.error('Log was not applied to the data. Apply log first.')    
         
     def crop(self, top_left, bottom_right):
         '''
@@ -1459,8 +1567,13 @@ class optimize(subclass):
             self._parent.error('Modifier not found!')
             
         vol = self._parent.reconstruct.FDK()
+        l2 = -vol.analyse.l2_norm()
         
-        return -vol.analyse.l2_norm()
+        # Try to release some memory...
+        vol = None
+        gc.collect()
+         
+        return l2
         
     @staticmethod     
     def _parabolic_min(values, index, space):    
@@ -1505,7 +1618,7 @@ class optimize(subclass):
         
         min_index = func_values.argmin()    
         
-        return reconstruct._parabolic_min(func_values, min_index, space)
+        return optimize._parabolic_min(func_values, min_index, space)
     
     def optimize_rotation_center(self, guess = 0, subscale = 1, full_search = True, center_of_mass = True):
         '''
@@ -1519,7 +1632,24 @@ class optimize(subclass):
         else:
             guess = 0
 
-        guess = self.optimize_geometry_modifier(modifier = 'rotation_axis', guess = guess, subscale = subscale, full_search = full_search)
+        # Downscale the data:
+        while subscale >= 1:
+            
+            self._parent.message('Subscale factor %1d' % subscale)    
+     
+            # We will use constant subscale in the vertical direction but vary the horizontal subscale:
+            samp =  [50, subscale]
+
+            guess = subscale * self._optimize_modifier_subsample(guess / subscale, 'rotation_axis', samp, full_search, display =True)
+            
+            self._parent.message('Current guess is %0.2f' % guess)
+            
+            subscale = subscale // 2
+            
+        self._parent._data_sampling = 1    
+        self._parent.reconstruct._initialize_ramp_filter(power = 1)    
+        
+        return guess
         
         self._parent.meta.geometry.rotation_axis_shift(guess)
         
@@ -1536,25 +1666,13 @@ class optimize(subclass):
         # Downscale the data:
         while subscale >= 1:
             
-            self._parent.message('Subscale factor %1d' % subscale)
+            self._parent.message('Subscale factor %1d' % subscale)    
             
-            self._parent._data_sampling = subscale
-            
-            # Create a ramp filter so FDK will calculate a gradient:
-            self._parent.reconstruct._initialize_ramp_filter(power = 2)
-                            
-            if full_search:
-                guess = self._full_search(self._modifier_l2cost, bounds = [guess / subscale - 2, guess / subscale + 2], maxiter = 5, args = modifier) * subscale
-            else:                    
-                opt = op.minimize(self._modifier_l2cost, x0 = guess / subscale, bounds = ((guess / subscale - 2, guess / subscale + 2),), method='COBYLA', 
-                                        options = {'maxiter': 15, 'disp': False}, args = modifier)
-                
-                guess = opt.x * subscale
+             # We will use same subscale in the both vertical and horizontal directions:
+            samp =  [subscale, subscale]
+            guess = subscale * self._optimize_modifier_subsample(guess / subscale, modifier, samp, full_search, display =True)
             
             self._parent.message('Current guess is %0.2f' % guess)
-            
-            vol = self._parent.reconstruct.FDK()
-            vol.display.slice()
             
             subscale = subscale // 2
             
@@ -1563,6 +1681,29 @@ class optimize(subclass):
         
         return guess
         
+    def _optimize_modifier_subsample(self, guess, modifier, samp = [1, 1], full_search = True, display = True):  
+        '''
+        Optimize a modifier using a particular sampling of the projection data.
+        '''
+        # 
+        self._parent._data_sampling = samp
+        
+        # Create a ramp filter so FDK will calculate a gradient:
+        self._parent.reconstruct._initialize_ramp_filter(power = 2)
+                        
+        if full_search:
+            guess = self._full_search(self._modifier_l2cost, bounds = [guess - 2, guess + 2], maxiter = 5, args = modifier) 
+
+        else:                    
+            opt = op.minimize(self._modifier_l2cost, x0 = guess, bounds = ((guess - 2, guess + 2),), method='COBYLA', 
+                                    options = {'maxiter': 15, 'disp': False}, args = modifier)
+            
+            guess = opt.x
+        
+        if display:
+            vol = self._parent.reconstruct.FDK()
+            vol.display.slice()
+            
 # **************************************************************
 #           RECONSTRUCT class and subclasses
 # **************************************************************
@@ -1580,6 +1721,9 @@ class reconstruct(object):
     _reconstruction_mask = None
     _projection_filter = None
     
+    # Values for the symmetrical volume crop:
+    _vol_crop = [0, 0, 0]    
+
     # Display while computing:
     _display_callback = False
     
@@ -1594,7 +1738,46 @@ class reconstruct(object):
         
         self._projections = [proj,]           
 
-    def add_projections(self, proj):
+    def auto_crop_volume(self, threshold = 0.01):
+        '''
+        Compute minimal volume size needed for the reconstruction using downsampled FDK:
+        '''
+        
+        # DOnsample the data before reconstructing:
+        subsample = 5
+        old_samp = self._data_sampling 
+        self._data_sampling = [subsample, subsample]
+
+        self._parent.message('Calculating downsampled FDK...')
+        
+        # Black magic begins...
+        self._vol_crop = [0, 0, 0]  
+        vol = self.FDK()                
+        
+        self._data_sampling = old_samp
+        
+        # Create projections of the reconstructed volume:
+        yz = vol.data.data.sum(0)
+        xz = vol.data.data.sum(1)
+        
+        # Find where the object is:
+        yz = yz > yz.max() * threshold
+        xz = xz > xz.max() * threshold
+
+        # Find projections on axes:
+        xproj = xz.max(1)
+        yproj = yz.max(1)
+        zproj = xz.max(0)
+        
+        # Convert projections to indexes:
+        xproj = numpy.where(xproj > 0) * subsample
+        yproj = numpy.where(yproj > 0) * subsample
+        zproj = numpy.where(zproj > 0) * subsample
+
+        # Create crop:
+        self._vol_crop[0] = numpy.min([xproj[0], self._parent.data.shape[2]-1 - xproj[-1]])
+        
+    def add_stack(self, proj):
         '''
         Add projection data to the reconstructor.
         '''
@@ -1920,8 +2103,9 @@ class reconstruct(object):
         hrz_shift = 0
         
         for proj in self._projections:
-            hrz_shift = numpy.max([hrz_shift, proj.meta.geometry.origin_shift()[0]])
-            vrt_shift = numpy.max([vrt_shift, proj.meta.geometry.origin_shift()[1]]) 
+            shift = proj.meta.geometry.origin_shift()
+            hrz_shift = numpy.max([hrz_shift, shift[0]])
+            vrt_shift = numpy.max([vrt_shift, shift[1]]) 
         
         # Decide on the detector and volume size:
         det_count_x = sz[2]
@@ -1929,11 +2113,13 @@ class reconstruct(object):
     
         # Make volume count x > detector count to include corneres of the object:
         if volume_extend == 0:    
-            vol_count_x = numpy.int(sz[2] + hrz_shift * 2)
-            vol_count_z = numpy.int(sz[0] + vrt_shift * 2)
+            vol_count_x = numpy.int(sz[2] - self._vol_crop[0] + hrz_shift * 2) 
+            vol_count_y = numpy.int(sz[2] - self._vol_crop[1] + hrz_shift * 2) 
+            vol_count_z = numpy.int(sz[0] - self._vol_crop[2] + vrt_shift * 2)
         else:
-            vol_count_x = numpy.int(sz[2] + volume_extend)
-            vol_count_z = numpy.int(sz[0] + volume_extend)
+            vol_count_x = numpy.int(sz[2] - self._vol_crop[0] + volume_extend)
+            vol_count_y = numpy.int(sz[2] - self._vol_crop[1] + volume_extend)
+            vol_count_z = numpy.int(sz[0] - self._vol_crop[2] + volume_extend)
 
         # Assuming that all img pixels are the same for now:
         img_pixel = self._projections[0].meta.geometry.img_pixel
@@ -1941,8 +2127,8 @@ class reconstruct(object):
         # Initialize the volume geometry:
         minx = -vol_count_x // 2 * img_pixel[0]
         maxx = +vol_count_x // 2 * img_pixel[0]
-        miny = -vol_count_x // 2 * img_pixel[0]
-        maxy = +vol_count_x // 2 * img_pixel[0]
+        miny = -vol_count_y // 2 * img_pixel[0]
+        maxy = +vol_count_y // 2 * img_pixel[0]
         minz = -vol_count_z // 2 * img_pixel[1]
         maxz = +vol_count_z // 2 * img_pixel[1]
 
@@ -2339,7 +2525,7 @@ class volume(object):
     postprocess = []
 
     # Sampling of the projection data volume:
-    _data_sampling = 1
+    _data_sampling = [1, 1]
 
     def __init__(self, vol = []):
         self.io = io(self)
@@ -2403,7 +2589,7 @@ class projections(object):
     _wisdom_status = 1
     
     # Sampling of the projection data volume:
-    _data_sampling = 1
+    _data_sampling = [1, 1]
 
     def __init__(self):
         self.io = io(self)
