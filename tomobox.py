@@ -23,8 +23,8 @@ from transforms3d import euler
     
 #import pkg_resources
 #pkg_resources.require("dxchange==0.1.2")
-from mayavi import mlab
-from tvtk.util.ctf import ColorTransferFunction
+#from mayavi import mlab
+#from tvtk.util.ctf import ColorTransferFunction
 
 # **************************************************************
 #           Parent class for all sinogram subclasses:
@@ -74,8 +74,11 @@ class history():
         result = None
         
         result = [ii for ii in self._records if operation == ii[0]]
-        
-        return result[-1]    
+
+        if numpy.size(result) > 0:
+            return result[-1]    
+        else:
+            return None
     
     def time_last(self):
         # Time between two latest records:
@@ -255,8 +258,9 @@ class geometry(subclass):
     def thetas(self):
         dt = 1#self._parent._data_sampling
         
-        if self._parent.data.shape[1] != numpy.shape(self._thetas[::dt]):
+        if self._parent.data.shape[1] != numpy.size(self._thetas[::dt]):
             self._parent.warning('Length of thetas array is not consistent with the data shape! Will try to initialize thetas using the data shape.')
+            
             self.init_thetas(theta_n = self._parent.data.shape[1])
             
         return numpy.array(self._thetas[::dt])
@@ -318,7 +322,7 @@ class meta(subclass):
 # **************************************************************
 #           DATA class
 # **************************************************************
-import scipy.interpolate as interp_sc
+
 import sys
 
 class data(subclass):
@@ -341,7 +345,7 @@ class data(subclass):
         dz = self._parent._data_sampling[0]
         dt = 1#self._parent._data_sampling
         
-        if dx + dt > 2:
+        if dx + dz + dt > 3:
             return numpy.ascontiguousarray(self._data[::dz, ::dt, ::dx])
         else:
             return self._data
@@ -367,7 +371,7 @@ class data(subclass):
         # Return reference image for the current projection:
         if self._ref.ndim > 2:
            
-            if self._data == None:
+            if self._data is None:
                 self._parent.warning('No raw data available. We don`t know how many projections there are in order to interpolate the reference image properly. Read raw data first.')
                 dsz = self._ref.shape[1]
 
@@ -390,10 +394,10 @@ class data(subclass):
             
             a = proj_index[proj_num]
             fract = a - numpy.floor(a)            
-            a = numpy.floor(a)            
+            a = int(numpy.floor(a))            
             
             if a < (dsz-1): 
-                b = numpy.ceil(proj_index[proj_num])
+                b = int(numpy.ceil(proj_index[proj_num]))
             else: 
                 b = a
                 
@@ -402,7 +406,28 @@ class data(subclass):
         else:
             
            # One flat field image is available: 
-           return self._ref   
+           return self._ref  
+           
+    def float32_to_uint8(self):       
+        mn = self._data.min()   
+        mx = self._data.max()   
+    
+        self._data = numpy.uint8((self._data - mn) / (mx - mn) * 255)
+        
+        return mn, mx
+        
+    def float32_to_uint16(self):       
+        mn = self._data.min()   
+        mx = self._data.max()   
+    
+        self._data = numpy.uint16((self._data - mn) / (mx - mn) * 65535)
+        
+        return mn, mx
+        
+    def float32_to_float16(self):       
+        self._data = numpy.float16(self._data)
+        
+        return self._data.min(), self._data.max()    
         
     @property        
     def shape(self):
@@ -410,7 +435,7 @@ class data(subclass):
         dz = self._parent._data_sampling[0]
         dt = 1#self._parent._data_sampling
         
-        return self._data[::dz, ::dt, ::dx].shape
+        return numpy.array(self._data[::dz, ::dt, ::dx].shape, dtype = 'int')
         
     @property            
     def size_mb(self):
@@ -516,20 +541,6 @@ def read_image_stack(file):
 
     return data
 
-def update_path(path, io):
-    '''
-    Memorize the path if it is provided, otherwise use the one that remember.
-    '''
-    if path == '':
-        path = io.path
-    else:
-        io.path = path
-
-    if path == '':
-        io._parent.error('Path to the file was not specified.')
-
-    return path
-
 def extract_2d_array(dimension, index, data):
     '''
     Extract a 2d array from 3d.
@@ -550,6 +561,29 @@ class io(subclass):
 
     #settings = {'sort_by_date':False}
     
+    # Private helper routines:
+    def _make_path(self, path):
+        '''
+        Make path if it doesn't exist.
+        '''    
+        if not os.path.exists(path):
+            os.makedirs(path)
+    
+    def _update_path(self, path):
+        '''
+        Memorize the path if it is provided, otherwise use the one that remember.
+        '''
+        if path == '':
+            path = self.path
+        else:
+            self.path = path
+    
+        if path == '':
+            self._parent.error('Path to the file was not specified.')
+    
+        return path
+    
+    # Public routoines:    
     def manual_init(self, src2obj = 100, det2obj = 100, theta_n = 128, theta_range = [0, 2*numpy.pi], det_width = 128, det_height = 128, det_pixel = [0.1, 0.1]):
         '''
         Manual initialization can be used when log file with methadata can not be read or
@@ -563,12 +597,12 @@ class io(subclass):
         prnt.data._data = (numpy.zeros([det_height, theta_n, det_width]))
         prnt.meta.history.add_record('io.manual_init')
 
-    def read_raw(self, path = '', index_range = [], y_range = [], x_range = []):   
+    def read_raw(self, path = '', filter = '', projections = True, index_range = [], y_range = [], x_range = []):   
         '''
         Read projection files automatically.
         This will look for files with numbers in the last 4 letters of their names.
         '''
-        path = update_path(path, self)
+        path = self._update_path(path)
 
         # Free memory:
         self._parent.data._data = None
@@ -576,12 +610,13 @@ class io(subclass):
 
         # if it's a file, read all alike, if a directory find a file to start from:
         if os.path.isfile(path):
-            filename = path
+            filename = os.path.basename(path)
             path = os.path.dirname(path)
 
             # if file name is provided, the range is needed:
-            first = index_range[0]
-            last = index_range[1]
+            if index_range != []:    
+                first = index_range[0]
+                last = index_range[1]
 
         else:
             # Try to find how many files do we need to read:
@@ -613,10 +648,10 @@ class io(subclass):
             print('Seed file name is:', filename)
             #srt = self.settings['sort_by_date']AMT24-25-SU1/
 
-            if self._parent:
-                self._parent.data._data = (read_image_stack(os.path.join(path,filename)))
-            else:
-                return read_image_stack(os.path.join(path,filename))
+        if self._parent:
+            self._parent.data._data = (read_image_stack(os.path.join(path,filename)))
+        else:
+            return read_image_stack(os.path.join(path,filename))
 
         
         # Trim the data with the provided inputs
@@ -628,11 +663,12 @@ class io(subclass):
         if (x_range != []):
             self._parent.data._data = self._parent.data._data[:, :, x_range[0]:x_range[1]]
 
-        # Transpose to satisfy ASTRA dimensions:
-        self._parent.data._data = numpy.transpose(self._parent.data._data, (1, 0, 2))
-        self._parent.data._data = numpy.flipud(self._parent.data._data)
-        self._parent.data._data = numpy.ascontiguousarray(self._parent.data._data, dtype=numpy.float32)
-        
+        # Transpose to satisfy ASTRA dimensions if loading projection data:
+        if projections:
+            self._parent.data._data = numpy.transpose(self._parent.data._data, (1, 0, 2))
+            self._parent.data._data = numpy.flipud(self._parent.data._data)
+            self._parent.data._data = numpy.ascontiguousarray(self._parent.data._data, dtype=numpy.float32)
+
         # add record to the history:
         self._parent.meta.history.add_record('io.read_raw', path)
 
@@ -654,7 +690,7 @@ class io(subclass):
             self._parent.error('path_files parameter in read_ref() should be iether a full file name or a list of file names')
             
         # Swap the axses for ASTRA:
-        ref = numpy.transpose(ref, [1,0,2])    
+        #ref = numpy.transpose(ref, ,0,2])    
 
         self._parent.data._ref = ref
 
@@ -727,7 +763,7 @@ class io(subclass):
         '''
         Parser for the metadata file that contains information about the acquisition system.
         '''
-        path = update_path(path, self)
+        path = self._update_path(path)
 
         if (str.lower(kind) == 'skyscan'):
             
@@ -747,6 +783,18 @@ class io(subclass):
 
         self._parent.message('Meta data loaded.')
         
+    def read_flexray(self, path):
+        '''
+        Read raw projecitions, dark and flat-field, scan parameters,
+        '''
+        self.read_dark(path + '/di0000.tif')
+        
+        self.read_ref([path + '/io0000.tif', path + '/io0001.tif'])
+        
+        self.read_raw(path)
+        
+        self.read_meta(path + '', kind = 'flexray')
+        
     # **************************************************************
     # Parsers for metadata files
     # **************************************************************
@@ -754,7 +802,7 @@ class io(subclass):
         '''
         Use this routine to parse a text file generated by Navrit
         '''
-        path = update_path(path,self)
+        path = self._update_path(path)
 
         # Try to find the log file in the selected path
         log_file = [x for x in os.listdir(path) if (os.path.isfile(os.path.join(path, x)) and 'txt' in os.path.join(path, x))]
@@ -805,10 +853,13 @@ class io(subclass):
         '''
         Use this routine to parse 'scan settings.txt' file generated by FlexRay machine
         '''
-        path = update_path(path,self)
+        
+        import re
+        
+        path = self._update_path(path)
 
         # Try to find the log file in the selected path
-        log_file = [x for x in os.listdir(path) if (os.path.isfile(os.path.join(path, x)) and 'settings.txt' in os.path.join(path, x))]
+        log_file = [x for x in os.listdir(path) if (os.path.isfile(os.path.join(path, x)) and 'data settings XRE.txt' in os.path.join(path, x))]
 
         if len(log_file) == 0:
             raise FileNotFoundError('Log file not found in path: ' + path)
@@ -829,16 +880,20 @@ class io(subclass):
 
         with open(log_file, 'r') as logfile:
             for line in logfile:
-                name, var = line.partition(":")[::2]
-                name = name.strip().lower()
+                name = line.partition('=')[0]
+                var = re.findall('"([^"]*)"', line)
 
+                name = name.strip().lower()
+                
                 # If name contains one of the keys (names can contain other stuff like units):
                 geom_key = [geom_dict[key] for key in geom_dict.keys() if key in name]
 
                 if geom_key != []:
                     #factor = self._parse_unit(name)
                     factor = 1 # there are no units mentioned in flexray file
-                    records[geom_key[0]] = float(var)*factor
+                    
+                    if var != []:
+                        records[geom_key[0]] = float(var[0])*factor
 
         # Convert the geometry dictionary to geometry object:        
         self._parent.meta.geometry.src2obj = records['src2obj']
@@ -857,7 +912,7 @@ class io(subclass):
 
     def _parse_skyscan_meta(self, path = ''):
 
-        path = update_path(path,self)
+        path = self._update_path(path)
 
         # Try to find the log file in the selected path
         log_file = [x for x in os.listdir(path) if (os.path.isfile(os.path.join(path, x)) and os.path.splitext(os.path.join(path, x))[1] == '.log')]
@@ -948,7 +1003,7 @@ class io(subclass):
         
     
     def read_skyscan_thermalshifts(self, path = ''):
-        path = update_path(path,self)
+        path = self._update_path(path)
 
         # Try to find the log file in the selected path
         fname = [x for x in os.listdir(path) if (os.path.isfile(os.path.join(path, x)) and os.path.splitext(os.path.join(path, x))[1] == '.csv')]
@@ -975,15 +1030,64 @@ class io(subclass):
                 shifts.append([float(row['x']), float(row['y'])])
         
             self._parent.meta.geometry.add_thermal_shifts(numpy.array(shifts))
-            
-    def save_tiff(self, path = '', fname='data', digits = 4):        
-        self.save_slices(path, fname, digits)
+    
+    def compress_zip(self, path = '/ufs/kostenko/GitProjects/Print3D/fossil_henri_0/'):
+        '''
+        Create a zip file from saved slices. Need this for 3D printing.
+        '''
+        from zipfile import ZipFile
 
-    def save_slices(self, path = '', fname='data', digits = 4):
+        # initializing empty file paths list
+        file_paths = []
+
+        # crawling through directory and subdirectories
+        for root, directories, files in os.walk(path):
+            for filename in files:
+                filepath = os.path.join(root, filename)
+                file_paths.append(filepath)
+        
+        with ZipFile(os.path.join(path, 'fossil_.zip'),'w') as zip:
+                # writing each file one by one
+                for full_path in file_paths:
+                    zip.write(full_path, os.path.basename(full_path))
+        
+    def save_titan_png(self, path = '', fname='data', axis = 2):
+        '''
+        '''
+        from scipy import misc
+        import os
+                
+        data = self._parent.data._data
+        
+        # Make sure that the path exists
+        self._make_path(path)
+        
+        for ii in range(0, data.shape[axis]):
+            fname_tmp = fname+"_%04d.png" % (ii+1)
+            
+            im = numpy.zeros([1080, 1920])
+            
+            margin = 400
+            
+            if axis == 0:
+                im[:data.shape[1], margin:(margin+data.shape[2])] = data[ii,:,:]
+            elif axis == 1:
+                im[:data.shape[0], margin:(margin+data.shape[2])] = data[:,ii,:]
+            elif axis == 2:
+                im[:data.shape[0], margin:(margin+data.shape[1])] = data[:,:,ii]
+                   
+            misc.imsave(name = os.path.join(path, fname_tmp), arr = im)
+            
+            print("\r Progress {:2.1%}".format((ii+1) / data.shape[axis]), end=" ")        
+            
+    def save_tiff(self, path = '', fname='data', digits = 4, axis = 0):        
         '''
         Saves the data to tiff files
         '''
         from PIL import Image
+        
+        # Make sure that the path exists
+        self._make_path(path)
         
         if self._parent.data._data is not None:
             
@@ -992,7 +1096,42 @@ class io(subclass):
             if digits <= numpy.log10(im_nb):
                 digits = int(numpy.log10(im_nb)) + 1
                 
-            path = update_path(path, self)
+            path = self._update_path(path)
+            fname = os.path.join(path, fname)
+            
+            for i in range(0,self._parent.data._data.shape[0]):
+                fname_tmp = fname
+                fname_tmp += '_'
+                fname_tmp += str(i).zfill(digits)
+                fname_tmp += '.tiff'
+                if axis == 0:
+                    im = Image.fromarray(self._parent.data._data[i,:,:])
+                elif axis == 1:
+                    im = Image.fromarray(self._parent.data._data[:,i,:])
+                elif axis == 2:
+                    im = Image.fromarray(self._parent.data._data[:,:,i])
+                else:
+                    self._parent.error('Wrong axis!')
+                    
+                im.save(fname_tmp)
+
+    def save_slices(self, path = '', fname='data', digits = 4):
+        '''
+        Saves the data to tiff files
+        '''
+        from PIL import Image
+        
+        # Make sure that the path exists
+        self._make_path(path)
+        
+        if self._parent.data._data is not None:
+            
+            # First check if digit is large enough, otherwise add a digit
+            im_nb = self._parent.data._data.shape[0]
+            if digits <= numpy.log10(im_nb):
+                digits = int(numpy.log10(im_nb)) + 1
+                
+            path = self._update_path(path)
             fname = os.path.join(path, fname)
             
             for i in range(0,self._parent.data._data.shape[0]):
@@ -1009,6 +1148,9 @@ class io(subclass):
         '''
         from PIL import Image
         
+        # Make sure that the path exists
+        self._make_path(path)
+        
         if self._parent.data._data is not None:
         
             # First check if digit is large enough, otherwise add a digit
@@ -1016,7 +1158,7 @@ class io(subclass):
             if digits <= numpy.log10(im_nb):
                 digits = int(numpy.log10(im_nb)) + 1
                 
-            path = update_path(path, self)
+            path = self._update_path(path)
             fname = os.path.join(path, fname)
             
             for i in range(0,self._parent.data._data.shape[1]):
@@ -1082,8 +1224,9 @@ class display(subclass):
         plt.imshow(img, cmap = self._cmap, origin='lower')
         plt.colorbar()
         plt.show()
+        plt.pause(0.0001)
 
-    def slice_movie(self, dim_num, fig_num = []):
+    def slice_movie(self, dim_num = 1, fig_num = []):
         '''
         Display a 2D slice of 3D volumel
         '''
@@ -1103,7 +1246,7 @@ class display(subclass):
             plt.title(slice_num)
             plt.pause(0.0001)
 
-    def projection(self, dim_num, fig_num = []):
+    def projection(self, dim_num = 1, fig_num = []):
         '''
         Get a projection image of the 3d data.
         '''
@@ -1114,8 +1257,9 @@ class display(subclass):
         
         plt.colorbar()
         plt.show()
+        plt.pause(0.0001)
             
-    def max_projection(self, dim_num, fig_num = []):
+    def max_projection(self, dim_num = 1, fig_num = []):
         '''
         Get maximum projection image of the 3d data.
         '''
@@ -1126,8 +1270,9 @@ class display(subclass):
         
         plt.colorbar()
         plt.show()
+        plt.pause(0.0001)
 
-    def min_projection(self, dim_num, fig_num = []):
+    def min_projection(self, dim_num = 1, fig_num = []):
         '''
         Get maximum projection image of the 3d data.
         '''
@@ -1138,6 +1283,7 @@ class display(subclass):
         
         plt.colorbar()
         plt.show()
+        plt.pause(0.0001)
 
     def volume_viewer(self, orientation = 'x_axes', min_max = []):
         '''
@@ -1230,17 +1376,13 @@ class analyse(subclass):
                 plt.plot(b, a)
             plt.show()
 
-        return a, b
-
-    def threshold(self, threshold = None):
-        '''
-        Apply simple segmentation
-        '''
+        return a, b       
 
 # **************************************************************
 #           PROCESS class and subclasses
 # **************************************************************
 from scipy import ndimage
+import simulate
 #from tomopy.recon import rotation
 import scipy.ndimage.interpolation as interp
 
@@ -1260,9 +1402,22 @@ class process(subclass):
 
         self._parent.message('Arbitrary function applied.')
 
-    def pixel_calibration(self, kernel=[5, 5]):
+    def interpolate_holes(self, kernel = [3,3,3], min_valid = 0, max_valid = numpy.inf):
         '''
-        Apply correction to miscalibrated pixels.
+        Fill in the holes, for instance, saturated pixels.
+        '''
+        mask = numpy.float32((self._parent.data._data > min_valid) & (self._parent.data._data < max_valid))
+        tmp = ndimage.filters.gaussian_filter(self._parent.data._data * mask, sigma = kernel) / ndimage.filters.gaussian_filter(mask, sigma = kernel)
+        
+        tmp[~numpy.isfinite(tmp)] = 0
+
+        mask = ~numpy.bool8(mask)
+        
+        self._parent.data._data[mask] = tmp[mask]
+        
+    def residual_rings(self, kernel=[3, 3]):
+        '''
+        Apply correction by computing outlayers .
         '''
         # Compute mean image of intensity variations that are < 5x5 pixels
         self._parent.message('Starting pixel callibration. This can take some time, depending on the kernel size.')
@@ -1270,14 +1425,14 @@ class process(subclass):
         res = self._parent.data.data - ndimage.filters.median_filter(self._parent.data.data, [kernel[1], 1, kernel[0]])
         res = res.mean(1)
         self._parent.data.data -= res.reshape((res.shape[0], 1, res.shape[1]))
-        self._parent.meta.history.add_record('Pixel calibration', 1)
-        self._parent.message('Pixel calibration correction applied.')
+        self._parent.meta.history.add_record('residual_rings', 1)
+        self._parent.message('Residual ring correcion applied.')
 
     def medipix_quadrant_shift(self):
         '''
         Expand the middle line
         '''
-        self._parent.data.data[:,:, 0:self._parent.data.shape[2]//2 - 2] = self._parent.data.data[:,:, 2:self._parent.data.shape[2]/2]
+        self._parent.data.data[:,:, 0:self._parent.data.shape[2]//2 - 2] = self._parent.data.data[:,:, 2:self._parent.data.shape[2]//2]
         self._parent.data.data[:,:, self._parent.data.shape[2]//2 + 2:] = self._parent.data.data[:,:, self._parent.data.shape[2]//2:-2]
 
         # Fill in two extra pixels:
@@ -1327,6 +1482,9 @@ class process(subclass):
                 
                 if numpy.min(ref) <= 0:
                     self._parent.warning('Flat field reference image contains zero (or negative) values! Will replace those with little tiny numbers.')
+
+                    tiny = ref[ref > 0].min()
+                    ref[ref <= 0] = tiny
 
                     tiny = ref[ref > 0].min()
                     ref[ref <= 0] = tiny
@@ -1432,48 +1590,41 @@ class process(subclass):
             
         self._parent.message('Tilt is applied.')
         
-    def center_shift(self, offset=None, test_path=None, ind=None, cen_range=None):
+    def auto_crop(self, threshold = 0.01):
         '''
-        Find the center of the sinogram and apply the shift to corect for the offset
+        Crops projection data living only the area that is > than the maximum * threshold
         '''
-        print('Outdated! Use a newer function!')
-        '''sz = self._parent.data.shape[2] // 2
+        
+        # Project along the theta dimension and apply threshold:
+        proj = self._parent.data.data.sum(1)
+        
+        # Check if the logarithm was applied. If not treat the rpojections as intensity:
+        if not 'process.log(air_intensity, bounds)' in self._parent.meta.history.keys:                        
+            self._parent.warning('Logarithm was not found in history. Will assume that projections are intensity images.')
+            proj = -numpy.log(proj / proj.max())
+            
+        proj = proj > proj.max() * threshold
 
-        if test_path is not None:
-            rotation.write_center(self._parent.data.data, theta=self._parent.meta.geometry.thetas, dpath=test_path, ind=ind, cen_range=cen_range, sinogram_order=True)
-
-        else:
-            if offset is None:
-                offset = sz-rotation.find_center(self._parent.data.data, self._parent.meta.geometry.thetas,  sinogram_order=True)[0]
-
-            else:
-                # Do nothing is the offset is less than 1 pixel
-                if (numpy.abs(offset) >= 1):
-                    self._parent.data.data = interp.shift(self._parent.data.data, (0,0,offset))
-                    self._parent.meta.history.add_record('process.center_shift(offset)', offset)
-
-                    self._parent.message('Horizontal offset corrected.')
-                else:
-                    self._parent.warning("Center shift found an offset smaller than 1. Correction won't be applied")
-        '''
-
-
-    def bin_data(self, bin_theta = True):
-        '''
-        Bin data with a factor of two
+        # Project vertically and horizontally:
+        xproj = proj.max(0)
+        yproj = proj.max(1)
+        
+        # Convert projections to indexes:
+        xproj = numpy.where(xproj > 0)
+        yproj = numpy.where(yproj > 0)
+                   
+        crop_length_x = numpy.min([xproj[0] -5, self._parent.data._data.shape[2]-6 - xproj[-1]])
+        crop_length_y = numpy.min([yproj[0] -5, self._parent.data._data.shape[0]-6 - yproj[-1]])
         Outdated!!! Use _data_sampling in property in reconstruction.
         '''
-        '''
-        self._parent.data._data = (self._parent.data._data[:, :, 0:-1:2] + self._parent.data._data[:, :, 1::2]) / 2
-        self._parent.data._data = (self._parent.data._data[0:-1:2, :, :] + self._parent.data._data[1::2, :, :]) / 2
-
-        self._parent.meta.geometry.det_pixel *= 2
         
-        #Bin angles with a factor of two
+        if crop_length_x < 0: crop_length_x =0
+        if crop_length_y < 0: crop_length_y =0
         
-        if bin_theta:
-            self._parent.data._data = (self._parent.data._data[:,0:-1:2,:] + self._parent.data._data[:,1::2,:]) / 2
-            self._parent.meta.geometry.thetas = numpy.array(self._parent.meta.geometry.thetas[0:-1:2] + self._parent.meta.geometry.thetas[1::2]) / 2
+        print('We decided to crop in x and y: ', [crop_length_x, crop_length_y])
+        
+        self.crop([crop_length_x, crop_length_y], [crop_length_x, crop_length_y])
+            
         '''
         pass
         
@@ -1510,6 +1661,12 @@ class process(subclass):
         '''
         Crop the sinogram
         '''
+        # Make sure there are no negative indexes:
+        if top_left[0] < 0: top_left[0] = 0
+        if bottom_right[0] < 0: bottom_right[1] = 0
+        if top_left[1] < 0: top_left[0] = 0
+        if bottom_right[1] < 0: bottom_right[1] = 0
+            
         if bottom_right[1] > 0:
             self._parent.data._data = self._parent.data._data[top_left[1]:-bottom_right[1], :, :]
         else:
@@ -1538,12 +1695,60 @@ class process(subclass):
         self._parent.meta.history.add_record('process.crop_centered(center, dimensions)', [center, dimensions])
 
         self._parent.message('Sinogram cropped.')
+        
+    def equivalent_thickness(self, energy, spectrum, compound, density):
+        '''
+        Transfer intensity values to equivalent thickness
+        '''
+        sino = self._parent.data._data
+        
+        # Assuming that we have log data!
+        if not 'process.log(air_intensity, bounds)' in self._parent.meta.history.keys:                        
+            self._parent.error('Logarithm was not found in history of the projection stack. Apply log first!')
+        
+        print('Generating the transfer function.')
+        
+        # Attenuation of 1 mm:
+        mu = simulate.spectra.linear_attenuation(energy, compound, density, thickness = 0.1)
+        
+        # Make thickness range that is sufficient for interpolation:
+        thickness_min = 0
+        thickness_max = sino.shape[2] * self._parent.meta.geometry.img_pixel[1]
+        
+        print('Assuming thickness range:', [thickness_min, thickness_max])
+        thickness = numpy.linspace(thickness_min, thickness_max, 1000)
+        
+        exp_matrix = numpy.exp(-numpy.outer(thickness, mu))
+        synth_counts = exp_matrix.dot(spectrum)
+        
+        plt.figure()
+        plt.plot(thickness, synth_counts, 'r--', lw=4, alpha=.8)
+        plt.axis('tight')
+        plt.title('Intensity v.s. absorption length.')
+        plt.show()
+        
+        synth_counts = -numpy.log(synth_counts)
+        
+        print('Callibration intensity range:', [synth_counts[0], synth_counts[-1]])
+        print('Data intensity range:', [sino.min(), sino.max()])
+
+        print('Applying transfer function.')    
+        sino_interp = numpy.interp(sino, synth_counts, thickness)
+        
+        self._parent.data._data = numpy.array(sino_interp, dtype = 'float32')
+        
+    def bin_projections(self):
+        '''
+        Bin data with a factor of two in detector plane.
+        '''
+        self._parent.data._data = (self._parent.data._data[:, :, 0:-1:2] + self._parent.data._data[:, :, 1::2]) / 2
+        self._parent.data._data = (self._parent.data._data[0:-1:2, :, :] + self._parent.data._data[1::2, :, :]) / 2
 
 # **************************************************************
 #           OPTIMIZE class and subclasses
 # **************************************************************
 from scipy import optimize as op
-from scipy.optimize import minimize_scalar
+#from scipy.optimize import minimize_scalar
 
 class optimize(subclass):
     '''
@@ -1611,7 +1816,7 @@ class optimize(subclass):
         ii = 0
         for val in space:
             
-            print('Iteration %0d' % ii)
+            print('Step %0d / %0d' % (ii+1, maxiter))
             
             func_values[ii] = func(val, modifier = args)
             ii += 1           
@@ -1635,10 +1840,13 @@ class optimize(subclass):
         # Downscale the data:
         while subscale >= 1:
             
+            # Check that subscale is 1 or divisible by 2:
+            if (subscale != 1) & (subscale // 2 != subscale / 2): self._parent.error('Subscale factor should be a power of 2! Aborting...')
+            
             self._parent.message('Subscale factor %1d' % subscale)    
      
             # We will use constant subscale in the vertical direction but vary the horizontal subscale:
-            samp =  [50, subscale]
+            samp =  [10, subscale]
 
             guess = subscale * self._optimize_modifier_subsample(guess / subscale, 'rotation_axis', samp, full_search, display =True)
             
@@ -1646,11 +1854,9 @@ class optimize(subclass):
             
             subscale = subscale // 2
             
-        self._parent._data_sampling = 1    
+        self._parent._data_sampling = [1, 1]    
         self._parent.reconstruct._initialize_ramp_filter(power = 1)    
-        
-        return guess
-        
+                
         self._parent.meta.geometry.rotation_axis_shift(guess)
         
         return guess
@@ -1665,6 +1871,9 @@ class optimize(subclass):
         
         # Downscale the data:
         while subscale >= 1:
+            
+            # Check that subscale is 1 or divisible by 2:
+            if (subscale != 1) & (subscale // 2 != subscale / 2): self._parent.error('Subscale factor should be a power of 2! Aborting...')
             
             self._parent.message('Subscale factor %1d' % subscale)    
             
@@ -1704,6 +1913,8 @@ class optimize(subclass):
             vol = self._parent.reconstruct.FDK()
             vol.display.slice()
             
+        return guess    
+            
 # **************************************************************
 #           RECONSTRUCT class and subclasses
 # **************************************************************
@@ -1722,7 +1933,7 @@ class reconstruct(object):
     _projection_filter = None
     
     # Values for the symmetrical volume crop:
-    _vol_crop = [0, 0, 0]    
+    _vol_crop = numpy.array([0, 0, 0])
 
     # Display while computing:
     _display_callback = False
@@ -1740,21 +1951,23 @@ class reconstruct(object):
 
     def auto_crop_volume(self, threshold = 0.01):
         '''
-        Compute minimal volume size needed for the reconstruction using downsampled FDK:
+        Compute minimal volume size needed for the reconstruction using downsampled FDK. Use with care when multiple projection stacks are present.
+        It will put the _data_sampling setting to the default value [1, 1].
         '''
         
-        # DOnsample the data before reconstructing:
-        subsample = 5
-        old_samp = self._data_sampling 
-        self._data_sampling = [subsample, subsample]
+        # Donsample the data before reconstructing:
+        subsample = 1
+        for stack in self._projections: 
+            stack._data_sampling = [subsample, subsample]
 
-        self._parent.message('Calculating downsampled FDK...')
+        print('Calculating downsampled FDK...')
         
-        # Black magic begins...
-        self._vol_crop = [0, 0, 0]  
+        # First compute a downsampled FDK ...
+        self._vol_crop = numpy.array([0, 0, 0])
         vol = self.FDK()                
         
-        self._data_sampling = old_samp
+        for stack in self._projections: 
+            stack._data_sampling = [1,1]
         
         # Create projections of the reconstructed volume:
         yz = vol.data.data.sum(0)
@@ -1768,14 +1981,24 @@ class reconstruct(object):
         xproj = xz.max(1)
         yproj = yz.max(1)
         zproj = xz.max(0)
-        
+                
         # Convert projections to indexes:
         xproj = numpy.where(xproj > 0) * subsample
         yproj = numpy.where(yproj > 0) * subsample
         zproj = numpy.where(zproj > 0) * subsample
 
         # Create crop:
-        self._vol_crop[0] = numpy.min([xproj[0], self._parent.data.shape[2]-1 - xproj[-1]])
+        self._vol_crop[0] = numpy.min([xproj[0] , self._total_data_shape()[2]-1 - xproj[-1]])
+        self._vol_crop[1] = numpy.min([yproj[0], self._total_data_shape()[2]-1 - yproj[-1]])
+        self._vol_crop[2] = numpy.min([zproj[0], self._total_data_shape()[0]-1 - zproj[-1]])
+        
+        # Buffer:
+        self._vol_crop -= 10
+        
+        # No cropping with negative values:
+        self._vol_crop[self._vol_crop < 0] = 0
+
+        print('We have decided to auto-crop using the following margins:',  self._vol_crop)
         
     def add_stack(self, proj):
         '''
@@ -1868,6 +2091,8 @@ class reconstruct(object):
         if not pixel_mask is None:
             for ii in range(0, sz[1]):
                 self._projection_mask = self._projection_mask[:, ii, :] * pixel_mask
+
+        self._projection_mask = numpy.array(self._projection_mask, dtype='float32')
        
         #prnt.message('Projection mask is initialized')
 
@@ -1877,7 +2102,7 @@ class reconstruct(object):
         '''
         sz = self._total_data_shape()
 
-        self._reconstruction_mask = numpy.ones(sz[0], sz[2], sz[2], dtype = 'bool')
+        self._reconstruction_mask = numpy.ones([sz[0], sz[2], sz[2]], dtype = 'bool')
         
         # Loop through all projection datasets:
         for proj in self._projections:   
@@ -1891,16 +2116,16 @@ class reconstruct(object):
             radius = 2 * det_width * src2obj / numpy.sqrt(total**2 + (det_width*pixel[0])**2) - 3
 
             # Create 2D mask:
-            yy,xx = numpy.ogrid[-sz//2:sz//2, -sz//2:sz//2]
+            yy,xx = numpy.ogrid[-sz[2]//2:sz[2]//2, -sz[2]//2:sz[2]//2]
 
             self._reconstruction_mask = numpy.array(xx**2 + yy**2 < radius**2, dtype = 'float32')
 
             # Replicate to 3D:           
-            self._reconstruction_mask *= (numpy.tile(self._reconstruction_mask[None, :,:], [sz[0], 1, 1]))
+            self._reconstruction_mask = (numpy.tile(self._reconstruction_mask[None, :,:], [sz[0], 1, 1]))
             
         self._reconstruction_mask = numpy.ascontiguousarray(self._reconstruction_mask)
                                                        
-        self._parent.message('Reconstruction mask is initialized')
+        print('Reconstruction mask is initialized')
 
     def _initialize_odl(self):
         '''
@@ -2093,7 +2318,7 @@ class reconstruct(object):
         # Modifiers applied... Extend the volume if needed                    
         return vectors
             
-    def _initialize_astra(self, volume_extend = 0):
+    def _initialize_astra(self, force_vol_size = []):
 
         # Shape of the thotal projection data:
         sz = self._total_data_shape()
@@ -2112,14 +2337,14 @@ class reconstruct(object):
         det_count_z = sz[0]
     
         # Make volume count x > detector count to include corneres of the object:
-        if volume_extend == 0:    
+        if force_vol_size == []:    
             vol_count_x = numpy.int(sz[2] - self._vol_crop[0] + hrz_shift * 2) 
             vol_count_y = numpy.int(sz[2] - self._vol_crop[1] + hrz_shift * 2) 
             vol_count_z = numpy.int(sz[0] - self._vol_crop[2] + vrt_shift * 2)
         else:
-            vol_count_x = numpy.int(sz[2] - self._vol_crop[0] + volume_extend)
-            vol_count_y = numpy.int(sz[2] - self._vol_crop[1] + volume_extend)
-            vol_count_z = numpy.int(sz[0] - self._vol_crop[2] + volume_extend)
+            vol_count_x = numpy.int(force_vol_size[2])
+            vol_count_y = numpy.int(force_vol_size[1])
+            vol_count_z = numpy.int(force_vol_size[0])
 
         # Assuming that all img pixels are the same for now:
         img_pixel = self._projections[0].meta.geometry.img_pixel
@@ -2132,7 +2357,7 @@ class reconstruct(object):
         minz = -vol_count_z // 2 * img_pixel[1]
         maxz = +vol_count_z // 2 * img_pixel[1]
 
-        self.vol_geom = astra.create_vol_geom(vol_count_x, vol_count_x, vol_count_z, minx, maxx, miny, maxy, minz, maxz)
+        self.vol_geom = astra.create_vol_geom(vol_count_x, vol_count_y, vol_count_z, minx, maxx, miny, maxy, minz, maxz)
         
         total_vectors = numpy.zeros((0,12))
         
@@ -2194,7 +2419,9 @@ class reconstruct(object):
       if (min_constraint is not None):
           cfg['option']['MinConstraint'] = min_constraint
       
-      output = numpy.zeros(astra.functions.geom_size(self.vol_geom), dtype=numpy.float32)
+      geom_sz = astra.functions.geom_size(self.vol_geom)
+      
+      output = numpy.zeros(geom_sz, dtype=numpy.float32)
       rec_id = []
       sinogram_id = []
       alg_id = []
@@ -2210,16 +2437,19 @@ class reconstruct(object):
     
           # Use projection and reconstruction masks:
           if not self._reconstruction_mask is None:
-              print(self.vol_geom)
-              mask_id = astra.data3d.link('-vol', self.vol_geom, self._reconstruction_mask)
-              cfg['option']['ReconstructionMaskId'] = mask_id
+              
+              if self._reconstruction_mask.shape != geom_sz:
+                  print('Reconstruction mask shape is wrong! We won`t use it in the reconstruction.')
+              else:    
+                  mask_id = astra.data3d.link('-vol', self.vol_geom, self._reconstruction_mask)
+                  cfg['option']['ReconstructionMaskId'] = mask_id
     
           if not self._projection_mask is None:
               mask_id = astra.data3d.link('-sino', self.proj_geom, self._projection_mask)
               cfg['option']['SinogramMaskId'] = mask_id
     
           # Use modified filter:
-          if not self._projection_filter is None:
+          if (not self._projection_filter is None) & (algorithm != 'BP3D_CUDA'):
     
               sz = self._projection_filter.shape
     
@@ -2244,14 +2474,14 @@ class reconstruct(object):
     def _forwardproject(self, x, algorithm = 'FP3D_CUDA'):
 
       cfg = astra.astra_dict(algorithm)
-      
-          
+                
       output = numpy.zeros(astra.functions.geom_size(self.proj_geom), dtype=numpy.float32)
       rec_id = []
       sinogram_id = []
       alg_id = []
       
       try:          
+                    
           rec_id = astra.data3d.link('-vol', self.vol_geom, x)
           
           sinogram_id = astra.data3d.link('-sino', self.proj_geom, output)
@@ -2273,13 +2503,13 @@ class reconstruct(object):
 
       return output
 
-    def FDK(self):
+    def FDK(self, force_vol_size = []):
         '''
         FDK reconstruction based on ASTRA.
         '''
 
         # Initialize ASTRA:
-        self._initialize_astra()
+        self._initialize_astra(force_vol_size)
 
         # Run the reconstruction:
         vol = self._backproject(self._total_data(), algorithm='FDK_CUDA')
@@ -2295,12 +2525,12 @@ class reconstruct(object):
         # No need to make a history record - sinogram is not changed.
 
 
-    def SIRT(self, iterations = 10, min_constraint = None):
+    def SIRT(self, iterations = 10, min_constraint = None, force_vol_size = []):
         '''
         '''
 
         # Initialize ASTRA:
-        self._initialize_astra()
+        self._initialize_astra(force_vol_size)
 
         # Run the reconstruction:
         vol = self._backproject(self._total_data(), algorithm = 'SIRT3D_CUDA', iterations = iterations, min_constraint= min_constraint)
@@ -2309,56 +2539,120 @@ class reconstruct(object):
         # No need to make a history record - sinogram is not changed.
 
 
-    def SIRT_CPU(self, iterations = 10, min_constraint = None):
+    def SIRT_CPU(self, iterations = 10, min_constraint = 0, relative_constraint = None, force_vol_size = []):
         '''
 
         '''
         # Initialize ASTRA:
-        self._initialize_astra()
+        self._initialize_astra(force_vol_size)
 
         # Create a volume containing only ones for forward projection weights
         sz = self._total_data_shape()
         
         # Initialize weights:
-        vol_ones = numpy.ones((sz[0], sz[2], sz[2]), dtype=numpy.float32)
+        vol_ones = numpy.ones(astra.functions.geom_size(self.vol_geom), dtype=numpy.float32)
         vol = numpy.zeros_like(vol_ones, dtype=numpy.float32)
+        
+        vol_obj = volume(vol)
         
         weights = self._forwardproject(vol_ones)
         weights = 1.0 / (weights + (weights == 0))
 
         bwd_weights = 1.0 / sz[1]
 
-        vol = numpy.zeros((sz[0], sz[2], sz[2]), dtype=numpy.float32)
+        vol = numpy.zeros(astra.functions.geom_size(self.vol_geom), dtype=numpy.float32)
 
         for ii_iter in range(iterations):
+            
+            print('SIRT_CPU. Iteration %01d' % ii_iter)
+            
             fwd_proj_vols = self._forwardproject(vol)
 
             residual = (self._total_data() - fwd_proj_vols) * weights
 
             if not self._projection_mask is None:
                 residual *= self._projection_mask
-
+            
             vol += bwd_weights * self._backproject(residual, algorithm='BP3D_CUDA')
+            
+            # If relative_constraint is used, force values below relative threshold to 0:
+            if relative_constraint != None:
+                threshold = vol.max() * relative_constraint
+                vol[vol < threshold] = 0
 
+            # Enforce non-negativity or similar:
             if min_constraint != None:
                 vol[vol < min_constraint] = min_constraint
 
-        return volume(vol)
-        # No need to make a history record - sinogram is not changed.
+        vol_obj.data._data = vol    
 
-    def CPLS(self, iterations = 10, min_constraint = None):
+        return vol_obj
+        # No need to make a history record - sinogram is not changed.
+        
+    def EM_CPU(self, iterations = 10, force_vol_size = []):
+        '''
+        Expectation Maximization based of ASTRA projectors, however, reconstruction and input data are keept in the CPU memory.
+        '''
+         # Initialize ASTRA:
+        self._initialize_astra(force_vol_size)
+
+        # Create a volume containing only ones for forward projection weights
+        #sz = self._total_data_shape()
+        
+        data = self._total_data() 
+        
+        print('EM_CPU. Computing weights.')
+        
+        # Initialize weights:
+        weights = self._backproject(numpy.ones_like(data), algorithm='BP3D_CUDA')
+        reg = weights.max() / 100
+        weights[weights < reg] = reg
+        
+        # Regularization epsilon for the forward projection:
+        eps = data[:,0,:].max() / 100
+
+        # Initializae volume:
+        vol = numpy.ones(astra.functions.geom_size(self.vol_geom), dtype=numpy.float32)
+        vol_obj = volume(vol)
+        
+        for ii_iter in range(0, iterations):
+            
+            print('EM_CPU. Iteration %01d' % ii_iter)
+            
+            forward = self._forwardproject(vol)
+            forward[forward < eps] = eps
+
+            #plt.figure()
+            #plt.imshow(data[200,:,:], cmap='gray')
+
+            #plt.figure()
+            #plt.imshow(forward[200,:,:], cmap='gray')
+        
+            vol *= self._backproject(data / forward, algorithm='BP3D_CUDA') / weights
+
+            #plt.figure()
+            #plt.imshow(vol[200,:,:], cmap='gray')
+            
+            if not self._projection_mask is None:
+                vol *= self._projection_mask
+                
+        vol_obj.data._data = vol    
+
+        return vol_obj
+
+    def CPLS(self, iterations = 10, min_constraint = None, force_vol_size = []):
         '''
         Chambolle-Pock Least Squares
         '''
         prnt = self._parent
 
         # Initialize ASTRA:
-        self._initialize_astra()
+        self._initialize_astra(force_vol_size)
 
         # Create a volume containing only ones for forward projection weights
         sz = self._total_data_shape()
 
-        vol_ones = numpy.ones((sz[0], sz[2], sz[2]), dtype=numpy.float32)
+        vol_ones = numpy.ones(astra.functions.geom_size(self.vol_geom), dtype=numpy.float32)
         vol = numpy.zeros_like(vol_ones, dtype=numpy.float32)
         
         sigma = self._forwardproject(vol_ones)
@@ -2386,12 +2680,12 @@ class reconstruct(object):
 
 
 
-    def CGLS(self, iterations = 10, min_constraint = None):
+    def CGLS(self, iterations = 10, min_constraint = None, force_vol_size = []):
         '''
         
         '''
         # Initialize ASTRA:
-        self._initialize_astra()
+        self._initialize_astra(force_vol_size)
 
         # Run the reconstruction:
         vol = self._backproject(self._total_data(), algorithm = 'CGLS3D_CUDA', iterations = iterations, min_constraint=min_constraint)
@@ -2482,22 +2776,84 @@ class reconstruct(object):
         print(bounds)
         '''
         return mask
-
+        
 # **************************************************************
 #           VOLUME class and subclasses
 # **************************************************************
 from skimage import morphology
+import calculate as calc
 
 class postprocess(subclass):
+    
     '''
     Includes postprocessing of the reconstructed volume.
     '''
 
-    def threshold(self, volume, threshold = None):
+    def find_rotation(a, b):    
 
-        if threshold is None: threshold = volume.analyse.max() / 2
+        # Find image shapes:
+        sz = a.shape
+        n = int(numpy.ceil(numpy.max(sz[0:2]) / 2) * 2)
+    
+        # Where to put the result of FFT:
+        a_ = numpy.zeros((n*2, n*2, sz[2]), dtype = 'complex64')
+        b_ = numpy.zeros((n*2, n*2, sz[2]), dtype = 'complex64')
+    
+        print('Comuting 2D PPFT of the volumes.')
+        
+        # Iterate along Z:
+        for ii in range(sz[2]):
+            
+            a_[:,:,ii] = calc.ppft2(a[:,:,ii])
+            b_[:,:,ii] = calc.ppft2(b[:,:,ii])  
+        
+            print("\r Progress {:2.1%}".format((ii+1) / sz[2]), end=" ")    
+            
+        print('Comuting FFT of the volumes along Z.')
+        a_ = numpy.abs(numpy.fft.fft(a_, axis = 2))
+        b_ = numpy.abs(numpy.fft.fft(b_, axis = 2))
+              
+        # Compute the difference and integrate along Z:
+        correlation = numpy.abs(a_ - b_[:, ::-1,:]).sum(2)
+        
+        # Integrate along radius:
+        correlation = correlation.sum(0)
+    
+    
+        # Shift in pixels:    
+        shift = (numpy.argmin(correlation) - n)      
+                
+        # shift in degrees:  
+        if shift > 0:
+            return numpy.arctan(shift / n * 2 - 1) * 360 / numpy.pi + 90
+        else:
+            return numpy.arctan(1 + (shift+1) / n * 2) * 360 / numpy.pi - 90 
 
-        volume.data.data = ((volume.data.data > threshold) * 1.0)
+    
+    def bin_volume(self):
+        '''
+        Bin data with a factor of two in each direction.
+        '''
+        self._parent.data._data = (self._parent.data._data[:, :, 0:-1:2] + self._parent.data._data[:, :, 1::2]) / 2
+        self._parent.data._data = (self._parent.data._data[0:-1:2, :, :] + self._parent.data._data[1::2, :, :]) / 2
+        self._parent.data._data = (self._parent.data._data[:, 0:-1:2, :] + self._parent.data._data[:, 1::2, :]) / 2
+        
+    def threshold(self, threshold = None, relative = False, binary = True):
+        '''
+        Apply simple segmentation or discard small values.
+        '''
+        volume = self._parent
+        
+        if threshold is None: 
+            #threshold = volume.analyse.max() / 2
+            threshold = (numpy.percentile(volume.data.data, 98)+numpy.percentile(volume.data.data, 90) ) / 2
+        elif relative: 
+            threshold = (numpy.percentile(volume.data.data, 98)+numpy.percentile(volume.data.data, 90)) * threshold
+        
+        if binary:
+            volume.data._data = numpy.array((volume.data._data > threshold) * 1.0, dtype = 'float32')
+        else:
+            volume.data._data[volume.data._data < threshold] = 0
 
     def measure_thickness(self, volume, obj_intensity = None):
         '''
@@ -2515,7 +2871,515 @@ class postprocess(subclass):
 
         # Average distance:
         return numpy.mean(distance[skeleton])
+    
+    def mirror(self, axis):
+        self._parent.data._data = numpy.flip(self._parent.data._data, axis)
+        
+    def transpose(self, axes = [0, 1, 2]):
+        self._parent.data._data = numpy.transpose(self._parent.data._data, axes)
+    
+    def rotate(self, angle, dim_num = 0):
+        '''
+        Rotate the volume around dim_num.
+        '''
+        axes = numpy.array([0, 1, 2])
+        axes = axes[axes != dim_num]
 
+        print('Rotating the volume.')
+        self._parent.data._data = interp.rotate(self._parent.data._data, angle, axes = axes, reshape=False)
+                
+    def printer_support_seeds(self, min_dist = 2, spike_support = 100, generate_internal = True, max_spikes = 9999):
+        '''
+        Generate volumes with seeds for support structures for 3D printing.
+        '''
+        obj_vol = self._parent.data.data > 0
+        
+        # Map of distances from the closest support point:    
+        support_distance = numpy.zeros(obj_vol.shape, dtype='float32')
+        
+        # Seeds of internal and external supports:
+        seeds_external = numpy.zeros(obj_vol.shape, dtype='bool')
+        
+        if generate_internal:
+            seeds_internal = numpy.zeros(obj_vol.shape, dtype='bool')
+        else:
+            seeds_internal = None
+                    
+        # Crossection that is supported by the previous slice:
+        support_slice = numpy.zeros(obj_vol.shape[0:-1], dtype='Bool')
+        
+        # Crossection that is blocked by underlying slices:
+        blocked_slice = numpy.zeros(obj_vol.shape[0:-1], dtype='Bool')
+        
+        # Map of projected seed locations:
+        ext_seed_mask = numpy.ones(obj_vol.shape[0:-1], dtype='Bool')
+        int_seed_mask = numpy.ones(obj_vol.shape[0:-1], dtype='Bool')
+        
+        # Coordinate grids
+        xx, yy = numpy.indices(obj_vol.shape[0:-1])
+        
+        # Counter of seeds:
+        num_spikes = 0
+        
+        # Vertical loop to find unsupported regions
+        for ii in range(0, obj_vol.shape[2]):
+            print('...')
+            print("\r Progress {:2.1%}".format((ii+1) / obj_vol.shape[2]), end=" ")
+                
+            obj_slice = obj_vol[:, :, ii]
+                
+            # find distance from the supported area:
+            if support_slice.sum() > 0:
+                distance = obj_slice * ndimage.distance_transform_cdt(~support_slice)
+            else:
+                distance = obj_slice * numpy.ones(obj_vol.shape[0:-1], dtype='float16') * 1000
+            
+            unblocked_dist = distance * ~blocked_slice * ext_seed_mask
+            blocked_dist = distance * blocked_slice * int_seed_mask
+            
+            # Place seeds on the most unsupported locations:
+            while (num_spikes < max_spikes) & (unblocked_dist.max() > min_dist):
+                    
+                    # get the position of the region further away from support:
+                    coords = numpy.unravel_index(unblocked_dist.argmax(), unblocked_dist.shape)
+                    
+                    num_spikes += 1
+                    
+                    # create a seed:
+                    seeds_external[coords[0],coords[1],ii] = 1
+                    
+                    # Make a hole in the distance map:
+                    ext_seed_mask = ext_seed_mask & ((xx - coords[0])**2 + (yy - coords[1])**2 > spike_support ** 2)
+                    unblocked_dist *= ext_seed_mask
+                    
+            # Same as before but now in the blocked areas:
+            while (num_spikes < max_spikes) & (generate_internal) & (blocked_dist.max() > min_dist):
+                    
+                    # get the position of the region further away from support:
+                    coords = numpy.unravel_index(blocked_dist.argmax(), blocked_dist.shape)
+                    
+                    num_spikes += 1
+                    
+                    # create a seed:
+                    seeds_internal[coords[0],coords[1],ii] = 1
+        
+                    # Add a hole to the total map:
+                    int_seed_mask = int_seed_mask & ((xx - coords[0])**2 + (yy - coords[1])**2 > spike_support ** 2)            
+                    blocked_dist *= int_seed_mask
+                   
+            # Next slice will be supported by areas of the current one plus some distance:    
+            support_slice = ndimage.binary_dilation(obj_slice)
+            
+            # Keep track of what is blocked at the bottom:
+            blocked_slice = blocked_slice | obj_slice
+            
+            support_distance[:,:,ii] = (blocked_dist + unblocked_dist) + obj_slice
+
+        self._parent.message('Seed generation is done!')
+        
+        print('Total number of seeds:', num_spikes)
+      
+        return seeds_external, seeds_internal, support_distance
+      
+    def printer_support_grow(self, seeds_external, seeds_internal = None, radius_body = 12, radius_head = 4, radius_internal = 10):
+        '''
+        Grow internal and external support structures from seeds. Internal supports will be constant width, 
+        while the external ones will have small heads, thicker bodies, and yet thicker feet.
+        '''
+        
+        obj_vol = self._parent.data.data > 0
+        
+        feet_space = 30
+        base_space = 5
+        
+        # Make body radius relative:
+        radius_body = radius_body - radius_head
+                    
+        if not seeds_internal is None:
+            print('Making seeds grow for internal spikes')
+            
+            # Vertical projection of seeds:
+            projection = numpy.zeros(seeds_internal.shape[0:2], dtype='int16')
+            
+            # Grow seeds downwards:
+            for ii in range(1, obj_vol.shape[2]-feet_space):
+                
+                # Make new seeds grow:
+                if seeds_internal[:,:,-ii].max():      
+                    
+                    # Top phase:
+                    seeds_internal[:,:,-ii] = seeds_internal[:,:,-ii] | ndimage.binary_dilation(seeds_internal[:,:,-ii], iterations = radius_internal)        
+                
+                # Grow old seeds:
+                seeds_internal[:,:,-ii] = seeds_internal[:,:,-ii] | projection
+                
+                projection = seeds_internal[:,:,-ii]  
+
+                # Stop growing seeds where there is an intesection with the object:
+                projection = projection & ~obj_vol[:,:,-ii]
+                
+            print('Internal spikes grow feet')        
+            
+            projection = numpy.zeros(seeds_internal.shape[0:2], dtype='int16')
+            for ii in range(obj_vol.shape[2]-1-feet_space, obj_vol.shape[2]+1):
+                  
+                seeds_internal[:,:,-ii] = seeds_internal[:,:,-ii] | ndimage.binary_dilation(projection)
+                
+                projection = seeds_internal[:,:,-ii]
+        else:
+            seeds_internal = 0
+
+        print('Making seeds for external spikes')
+
+        for ii in range(1, obj_vol.shape[2]+1):
+            
+            # Make new seeds grow:
+            if seeds_external[:,:,-ii].max():      
+                # Top phase:
+                seeds_external[:,:,-ii] = ndimage.binary_dilation(seeds_external[:,:,-ii], iterations = radius_head)   
+                
+        print('External spikes grow width')        
+
+        seeds_external = numpy.int16(seeds_external)
+
+        projection = numpy.zeros(seeds_external.shape[0:2], dtype='int16')
+        
+        for ii in range(1, obj_vol.shape[2]+1):
+            print('...')
+            print("\r Progress {:2.1%}".format((ii+1) / obj_vol.shape[2]), end=" ")
+            
+            # Stop growing thick spikes:
+            projection *= (projection < radius_body)
+            
+            seeds_external[:,:,-ii] = seeds_external[:,:,-ii] | (ndimage.grey_dilation(projection + (projection > 0), 
+                                                                                         size = (3,3)))  
+            
+            projection = seeds_external[:,:,-ii]       
+
+        print('External spikes constant width')        
+
+        projection = numpy.zeros(seeds_external.shape[0:2], dtype='int16')
+        
+        for ii in range(1, obj_vol.shape[2]-feet_space):
+            print('...')
+            print("\r Progress {:2.1%}".format((ii+1) / (obj_vol.shape[2]-feet_space)), end=" ")
+              
+            seeds_external[:,:,-ii] = seeds_external[:,:,-ii] | projection  
+            
+            projection = seeds_external[:,:,-ii]
+            
+        print('External spikes grow base')        
+        
+        projection = numpy.zeros(seeds_external.shape[0:2], dtype='int16')
+        for ii in range(obj_vol.shape[2]-1-feet_space, obj_vol.shape[2]+1):
+            
+            print('...')
+            print("\r Progress {:2.1%}".format((ii+1) / feet_space), end=" ")
+            
+            seeds_external[:,:,-ii] = seeds_external[:,:,-ii] | ndimage.binary_dilation(projection)
+            
+            projection = seeds_external[:,:,-ii]
+
+        # Put volumes together:
+        obj_vol = (seeds_external + seeds_internal + obj_vol) > 0
+
+        print('Creating da bottom!')        
+        projection = obj_vol.max(2) > 0
+        
+        for ii in range(obj_vol.shape[2]-1-base_space, obj_vol.shape[2]+1):            
+            obj_vol[:,:,-ii] = obj_vol[:,:,-ii] | projection 
+
+        self._parent.data.data = obj_vol
+        
+        print('Yeeey!!!! Go, print me baby!')        
+
+    def _unwrap_angle(self, angles, ceil=2 * numpy.pi):
+        angles += ceil / 2.0
+        angles %= ceil
+        angles -= ceil / 2.0
+        return angles
+
+    def _get_log_base(self, shape, new_r):
+        """
+        Base of the log-polar transform.
+        The following holds:
+        :math:`log\_base = \exp( \ln [ \mathit{spectrum\_dim} ] / \mathit{loglpolar\_scale\_dim} )`,
+        or the equivalent :math:`log\_base^{\mathit{loglpolar\_scale\_dim}} = \mathit{spectrum\_dim}`.
+        """    
+        old_r = shape[0] * 1.1
+        
+        # COnvert form diameter to radius:
+        old_r /= 2.0
+        log_base = numpy.exp(numpy.log(old_r) / new_r)
+        
+        return log_base
+    
+    def _logpolar2d(self, image, pcorr_shape, log_base):
+               
+        imshape = image.shape
+        
+        center = imshape[0] / 2.0, imshape[1] / 2.0
+                
+        # 0 .. pi = only half of the spectrum is used
+        theta = numpy.zeros(imshape, dtype=numpy.float32)
+        theta -= numpy.linspace(-numpy.pi, numpy.pi, imshape[0], endpoint=False)[:, None]
+        
+        radius = numpy.zeros(imshape, dtype=numpy.float32)
+        radius += numpy.power(log_base, numpy.arange(imshape[1], dtype=float))[None, :]
+        
+        scale_y = 1 / imshape[0] * float(imshape[1])
+        
+        x = radius * numpy.cos(theta) + center[0]
+        y = scale_y * radius * numpy.sin(theta) + center[1]
+            
+        output = numpy.empty_like(y)
+        
+        # map_coordinates cannot handle complex numbers
+        if image.dtype == numpy.complex: 
+            image = abs(image)
+        
+        # Transform to a new coordinate system
+        image = interp.map_coordinates(image, [x,y], output=output, order=3,
+                             mode="constant", cval=0)
+        return output
+    
+    def _cross_correlation(self, im0, im1):
+        """
+        Computes cross-correlation between im0 and im1
+        """
+
+        # Cross-correlate:        
+        im0 = abs(numpy.fft.ifft2((im0 * im1.conjugate())))        
+        im0 = numpy.fft.fftshift(im0)
+    
+        # Find coordinates of the maximum:    
+        amax = numpy.argmax(im0)
+        vec = list(numpy.unravel_index(amax, im0.shape))
+        
+        # _compensate_fftshift is not appropriate here, this is OK.   
+        vec -= numpy.array(im0.shape, int) // 2
+        
+        return vec
+        
+    def _subpixel_shift(self, im0, im1, margin = [0, 0]):
+        '''
+        Calculate a subpixel shift using derivative method.
+        Pixels belonging to the 'margin' are discarded. Use margin if the image was shifted or infilled with zeros, for instance.
+        '''   
+        # Apply margins:
+        im0 = im0[margin[0]:, margin[1]:]
+        im1 = im1[margin[0]:, margin[1]:]
+            
+        if margin[0] > 0:
+            im0 = im0[:-margin[0], :]
+            im1 = im1[:-margin[0], :]
+        
+        if margin[1] > 0:
+            im0 = im0[: ,:-margin[1]]
+            im1 = im1[: ,:-margin[1]]
+        
+        # Compute derivative of im1 (symmetrical)
+        im_dx = (im0[2:, :] - im0[0:-2, :]) / 2
+        im_dy = (im0[:, 2:] - im0[:, 0:-2]) / 2
+        
+        # Difference between images will be compared with the derivative:
+        im0 = (im0 - im1)
+        
+        # Comute abses:
+        a_im_dx = numpy.abs(im_dx)
+        a_im_dy = numpy.abs(im_dy)
+        
+        # Compute shifts down to 0.1 pixel.           
+        im_dx = (im0[1:-1,:]) / im_dx   
+        im_dx = numpy.mean(im_dx[a_im_dx > a_im_dx.max() / 5])
+        im_dx = numpy.round(im_dx, decimals=2)
+        
+        im_dy = (im0[:,1:-1]) / im_dy    
+        im_dy = numpy.mean(im_dy[a_im_dy > a_im_dy.max() / 5])
+        im_dy = numpy.round(im_dy, decimals=2)
+        
+        if (numpy.abs(im_dx) > 1) | (numpy.abs(im_dy) > 1): 
+            self._parent.warning('Residual derivative should be smaller than 1 in _subpixel_shift(). Subpixel shift won`t be applied.')
+            
+            return [0, 0]
+        
+        return [im_dx, im_dy] 
+   
+    def _get_rot_scale(self, im0, im1):
+        """
+        Given two images, return their scale and angle difference.
+        """    
+        #print('Calculate rotation and scale change.')
+            
+        shape = im0.shape
+        
+        # Pcorr_shape...
+        pcorr_shape = (int(max(shape) * 1.0),) * 3
+        log_base = self._get_log_base(shape, pcorr_shape[1])
+        
+        # Transform to logpolar:
+        im0 = self._logpolar2d(im0, pcorr_shape, log_base) 
+        im1 = self._logpolar2d(im1, pcorr_shape, log_base)
+        
+        # Compute DFTs:
+        im0_fft = numpy.fft.fftshift(numpy.fft.fftn(im0))
+        im1_fft = numpy.fft.fftshift(numpy.fft.fftn(im1))
+        
+        # Filter:
+        xx, yy = numpy.indices(shape)
+        rads = numpy.sqrt(yy ** 2 + xx ** 2)    
+        filt = 1.0 - numpy.cos(rads) ** 2
+        filt[numpy.abs(rads) > numpy.pi / 2] = 1
+    
+        im0_fft = im0_fft * filt
+        im1_fft = im1_fft * filt
+            
+        (theta, rad) = self._cross_correlation(im0_fft, im1_fft)  
+        
+        # Apply corrections and refine the estimate in real space:
+        im1 = interp.shift(im1, [theta, rad])
+               
+        # Only if theta and rad are small, it makes sense to compute subpixel shift.
+        # Currently it will actually fail when margin is too large.
+        if (abs(theta)+abs(rad)) < 10:
+            subpix = self._subpixel_shift(im0, im1, [abs(theta), abs(rad)])
+        
+            theta = numpy.round(subpix[0] - theta, decimals = 2)
+            rad = subpix[1] - rad
+            
+        theta = numpy.rad2deg(-numpy.pi * 2 * theta / float(pcorr_shape[0]))
+        theta = -self._unwrap_angle(theta, 360)
+        
+        scale = 1.0 / log_base ** rad
+        
+        return theta, scale
+    
+    def _get_translation(self, im0, im1):
+        """
+        Find translation by cross_correlation of two 2D images.
+        """
+        
+        #print('Calculate translateion.')
+        
+        x,y = self._cross_correlation(numpy.fft.fft2(im0), numpy.fft.fft2(im1))
+        
+        im1 = interp.shift(im1, [x, y], )
+        
+        dx, dy = self._subpixel_shift(im0, im1, [0, 0])
+        
+        x = numpy.round(x - dx, decimals=2)
+        y = numpy.round(y - dy, decimals=2)
+            
+        return x, y, im1
+        
+    def volume_transform(self, vol, translations = [0, 0, 0], angles = [0, 0, 0], scale = 1.0):
+    
+        print('Applying 3D transformation to the volume.')
+        if scale != 1.0:
+            vol = interp.zoom(vol, scale)
+            
+        axes = numpy.array([0,1,2])    
+        
+        # I guess, applying rotations one by one is really wrong. But it works for now...
+        for axis in range(0,3):
+            if angles[axis] != 0:
+                
+                vol = interp.rotate(vol, angles[axis], axes=axes[axes != axis], reshape = False)
+    
+        if numpy.abs(translations).min() != 0:
+            vol = interp.shift(vol, translations)
+            
+        return vol
+    
+    def _progress_registration(self, im0_proj, im1_proj, iteration):
+        '''
+        Make a plot of registration progrress
+        '''
+        
+        plt.figure()
+        plt.subplot(231)
+        plt.imshow(im0_proj[0])
+        plt.subplot(232)
+        plt.imshow(im0_proj[1])
+        plt.subplot(233)
+        plt.imshow(im0_proj[2])
+        plt.subplot(234)
+        plt.imshow(im1_proj[0])
+        plt.subplot(235)
+        plt.imshow(im1_proj[1])
+        plt.subplot(236)
+        plt.imshow(im1_proj[2])
+        plt.show()
+        plt.pause(0.0001)
+        
+    def volume_registration(self, master_volume, numiter=1):
+        '''
+        Use cross-correlation approach to align two 3D volumes.
+        '''
+        # My parent:
+        prnt = self._parent
+        
+        # Volumes to align:
+        im1 = prnt.data._data
+        im0 = master_volume.data._data
+               
+        shape = im0.shape
+    
+        if shape != im1.shape:
+            prnt.error('Volumes must have the same size.')
+            return None
+            
+        # Right now scale is fixed to one. Testing needed to see if scale estimation works.
+        scale = 1.0
+        angle = numpy.zeros(3)
+        translation = numpy.zeros(3)
+        
+        # Compute projections for the volume 1:
+        im0_proj = [im0.sum(0), im0.sum(1), im0.sum(2)]
+        
+        # We will put the transformed image in im2:
+        im2 = im1.copy()
+            
+        for ii in range(numiter):
+            
+            # Compute projections for the volume 2:
+            im1_proj = [im2.sum(0), im2.sum(1), im2.sum(2)]
+                        
+            # Find rotations based on updated projections:
+            a0, scale0 = self._get_rot_scale(im0_proj[0], im1_proj[0])
+            a1, scale1 = self._get_rot_scale(im0_proj[1], im1_proj[1])
+            a2, scale2 = self._get_rot_scale(im0_proj[2], im1_proj[2])
+
+            angle += numpy.array([a0, a1, a2])
+            
+            im2 = self.volume_transform(im1, translation, -angle, 1.0)
+            
+            # Find translations first (+ update the image):
+            t1, t2, im1_proj[0] = self._get_translation(im0_proj[0], im1_proj[0])
+            t0, t2_, im1_proj[1] = self._get_translation(im0_proj[1], im1_proj[1])
+            t0_, t1_, im1_proj[2] = self._get_translation(im0_proj[2], im1_proj[2])
+
+            
+            # Show progress:
+            self._progress_registration(im0_proj, im1_proj, ii)
+                
+            # All rotations are updated at once at the moment. 
+            # For now we will discard the calculated scale.
+            
+            # Let's average estimated shifts and angles and use them to update the volume:
+            t0 = (t0 + t0_) / 2
+            t1 = (t1 + t1_) / 2
+            t2 = (t2 + t2_) / 2
+            
+            translation += numpy.array([t0, t1, t2])
+            
+            print('Applying shifts:', translation)
+            print('Applying rotations:', angle)        
+        
+        self._parent.data._data = im2
+        
+        return translation, angle, scale
+    
 class volume(object):
     data = []
     io = []
@@ -2527,16 +3391,58 @@ class volume(object):
     # Sampling of the projection data volume:
     _data_sampling = [1, 1]
 
-    def __init__(self, vol = []):
+    def __init__(self, vol = [], meta_data = []):
         self.io = io(self)
         self.display = display(self)
         self.analyse = analyse(self)
         self.data = data(self)
-        self.meta = meta(self)
         self.postprocess = postprocess(self)
+        
+        if meta_data == []:
+            self.meta = meta(self)
+        else:
+            self.meta = meta_data.copy()
 
         # Get the data in:
         self.data._data = vol
+        
+    def copy(self):
+        '''
+        Deep copy of the object:
+        '''
+        
+        # Create a new volume object to avoid copying pointers to data that is contained in the old object
+        vol = volume()
+        
+        # Here hopefully reconstruct will not have links with the old data object
+        
+        vol.meta = copy.deepcopy(self.meta)
+        vol.data = copy.deepcopy(self.data)
+        
+        return vol
+        
+    def message(self, msg):
+        '''
+        Send a message to IPython console.
+        '''
+        #log = logging.getLogger()
+        #log.setLevel(logging.DEBUG)
+        #log.debug(msg)
+        print(msg)
+
+    def error(self, msg):
+        '''
+        Throw an error:
+        '''
+        self.meta.history.add_record('error', msg)
+        raise ValueError(msg)
+
+    def warning(self, msg):
+        '''
+        Throw a warning. In their face!
+        '''
+        self.meta.history.add_record('warning', msg)
+        warnings.warn(msg)
 
 # **************************************************************
 #           SINOGRAM class
@@ -2652,7 +3558,7 @@ class projections(object):
             randomator += numpy.random.randint(0, 100)
 
         # If randomator is small, utter a wisdom!
-        if (randomator < 50):
+        if (randomator < 30):
            self._wisdom_status += 1
 
            # Pick one wisdom:
@@ -2670,9 +3576,7 @@ class projections(object):
         finished = True
 
         for k in _min_history:
-            self.message((k in self.meta.history.keys))
-
-            if not(k in self.meta.history.key):
+            if not(self.meta.history.find_record(k)):
                 self.message('You should use ' + k + ' as a next step')
                 finished = False
                 break
