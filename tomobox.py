@@ -1615,47 +1615,13 @@ class process(subclass):
                    
         crop_length_x = numpy.min([xproj[0] -5, self._parent.data._data.shape[2]-6 - xproj[-1]])
         crop_length_y = numpy.min([yproj[0] -5, self._parent.data._data.shape[0]-6 - yproj[-1]])
-        Outdated!!! Use _data_sampling in property in reconstruction.
-        '''
-        
+                
         if crop_length_x < 0: crop_length_x =0
         if crop_length_y < 0: crop_length_y =0
         
         print('We decided to crop in x and y: ', [crop_length_x, crop_length_y])
         
         self.crop([crop_length_x, crop_length_y], [crop_length_x, crop_length_y])
-            
-        '''
-        pass
-        
-    def auto_crop(self, threshold = 0.01):
-        '''
-        Crops projection data living only the area that is > than the maximum * threshold
-        '''
-        
-        if 'process.log(air_intensity, bounds)' in self._parent.meta.history.keys:
-            
-            # Project along the theta dimension and apply threshold:
-            proj = self._parent.data.data.sum(1)
-            proj = proj > proj.max() * threshold
-
-            # Project vertically and horizontally:
-            xproj = proj.max(0)
-            yproj = proj.max(1)
-            
-            # Convert projections to indexes:
-            xproj = numpy.where(xproj > 0)
-            yproj = numpy.where(yproj > 0)
-            
-            crop_length_x = numpy.min([xproj[0], self._parent.data._data.shape[2]-1 - xproj[-1]])
-            crop_length_y = numpy.min([yproj[0], self._parent.data._data.shape[0]-1 - yproj[-1]])
-            
-            print('We decided to crop in x and y: ', [crop_length_x, crop_length_y])
-            
-            self.crop([crop_length_y, crop_length_x], [crop_length_y, crop_length_x])
-            
-        else:
-            self._parent.error('Log was not applied to the data. Apply log first.')    
         
     def crop(self, top_left, bottom_right):
         '''
