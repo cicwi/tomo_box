@@ -1,3 +1,4 @@
+
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
@@ -19,12 +20,10 @@ import numpy
 import re
 import time
 import transforms3d
-from transforms3d import euler 
+from transforms3d import euler
     
 #import pkg_resources
 #pkg_resources.require("dxchange==0.1.2")
-#from mayavi import mlab
-#from tvtk.util.ctf import ColorTransferFunction
 
 # **************************************************************
 #           Parent class for all sinogram subclasses:
@@ -115,13 +114,13 @@ class geometry(subclass):
     
     '''
     Modifiers (dictionary of geometry modifiers that can be applied globaly or per projection)
-    VRT, HRZ and MAG are vertical, horizontal and prependicular directions relative to the original detector orientation     
+    VRT, HRZ and MAG are vertical, horizontal and prependicular directions relative to the original detector orientation    
     '''
         
     def __init__(self, parent):
         subclass.__init__(self, parent)
         
-        self.modifiers = {'det_vrt': 0, 'det_hrz': 0, 'det_mag': 0, 'src_vrt': 0, 'src_hrz': 0, 'src_mag': 0, 'det_rot': 0, 'dtheta':0, 'vol_x_tra': 0, 'vol_y_tra':0, 'vol_z_tra':0, 'vol_x_rot':0, 'vol_y_rot':0, 'vol_z_rot':0}    
+        self.modifiers = {'det_vrt': 0, 'det_hrz': 0, 'det_mag': 0, 'src_vrt': 0, 'src_hrz': 0, 'axs_hrz':0, 'src_mag': 0, 'det_rot': 0, 'dtheta':0, 'vol_x_tra': 0, 'vol_y_tra':0, 'vol_z_tra':0, 'vol_x_rot':0, 'vol_y_rot':0, 'vol_z_rot':0}    
 
     def initialize(self, src2obj, det2obj, det_pixel, theta_range, theta_n):
         '''
@@ -135,8 +134,33 @@ class geometry(subclass):
     def modifiers_reset(self):
         for key in self.modifiers.keys():
             self.modifiers[key] = 0
+
+    def report(self):
+        '''
+        Print a report of the geometry.
+        '''
+        print('   *** GEOMETRY REPORT ***')
+        print('_______________')
+        print(' All values, except for the detector size and pixel size, are in pixel sizes.')
+        print('_______________')
+        print('   Base geometry:')
+        print('_______________')
+        print('Source to Object Distance: %2.2f mm' % self.src2obj)
+        print('Detector to Object Distance: %2.2f mm' % self.det2obj)
+        print('Detector Pixel: %2.2f x %2.2f mm' % (self.det_pixel[1], self.det_pixel[0]))
+        print('Magnification: %2.2f' % self.magnification)
+        print('Detector size: %u x %u pixels' % (self._parent.data.shape[2],self._parent.data.shape[0]))
+        print('Detector physical size: %2.2f x %2.2f mm' % (self.det_size[1], self.det_size[0]))
+        print('Rotation range: [%2.2f , %2.2f ]' % (self.theta_range[0], self.theta_range[1]))
+        print('Rotation step: %2.2f' % self.theta_step)
+        print('_______________')
+        print('   Modifiers:')
+        print('_______________')
+        
+        for key in self.modifiers.keys():
+            print(key,': %5.2f mm' % self.modifiers[key])
     
-    def find_modifier(self, key, index = None):
+    def get_modifier(self, key, index = None):
         '''
         Get a geometry modifier for a prjection with index = index. Or take the first modifier that corresponds to the key.
         '''
@@ -153,9 +177,12 @@ class geometry(subclass):
         return None
 
     def translate_volume(self, vector):
-        self.modifiers['vol_x_tra'] += vector[0]
-        self.modifiers['vol_y_tra'] += vector[1]
-        self.modifiers['vol_z_tra'] += vector[2]
+        '''
+        Translate volume. vector is in pixels.
+        '''
+        self.modifiers['vol_x_tra'] += vector[0] * self.det_pixel[1]
+        self.modifiers['vol_y_tra'] += vector[1] * self.det_pixel[1]
+        self.modifiers['vol_z_tra'] += vector[2] * self.det_pixel[0]
 
     def rotate_volume(self, vector):
         self.modifiers['vol_x_rot'] += vector[0]
@@ -164,28 +191,35 @@ class geometry(subclass):
 
     def thermal_shift(self, thermal_shifts, additive = False):
         '''
-        Shift the source according to the thermal shift data
+        Shift the source according to the thermal shift data. Thermal shift is in pixels
         '''
         if additive:
-            self.modifiers['src_hrz'] += thermal_shifts[:,0]/(self.magnification - 1) 
-            self.modifiers['src_vrt'] += thermal_shifts[:,1]/(self.magnification - 1) 
+            self.modifiers['src_hrz'] += thermal_shifts[:,0]/(self.magnification - 1) * self.det_pixel[1]
+            self.modifiers['src_vrt'] += thermal_shifts[:,1]/(self.magnification - 1) * self.det_pixel[0]
         else:
-            self.modifiers['src_hrz'] = thermal_shifts[:,0]/(self.magnification - 1) 
-            self.modifiers['src_vrt'] = thermal_shifts[:,1]/(self.magnification - 1) 
+            self.modifiers['src_hrz'] = thermal_shifts[:,0]/(self.magnification - 1) * self.det_pixel[1]
+            self.modifiers['src_vrt'] = thermal_shifts[:,1]/(self.magnification - 1) * self.det_pixel[0]
 
-    def rotation_axis_shift(self, shift, additive = False):
+    def set_rotation_axis(self, shift, additive = False):
+        '''
+        shift is in pixels.
+        '''
         if additive:
-            self.modifiers['det_hrz'] += -shift / self.magnification
-            self.modifiers['src_hrz'] += -shift / self.magnification
+            self.modifiers['axs_hrz'] += shift / self.magnification * self.det_pixel[1]
         else:
-            self.modifiers['det_hrz'] = -shift / self.magnification
-            self.modifiers['src_hrz'] = -shift / self.magnification          
+            self.modifiers['axs_hrz'] = shift / self.magnification * self.det_pixel[1]
+
+    def get_rotation_axis(self):
+        '''
+        Retrurn the rotation axis shift in pixels.
+        '''
+        return self.modifiers['axs_hrz'] * self.magnification / self.det_pixel[1]
 
     def optical_axis_shift(self, shift, additive = False):
         if additive:
-            self.modifiers['det_vrt'] += shift
+            self.modifiers['det_vrt'] += shift * self.det_pixel[0]
         else:
-            self.modifiers['det_vrt'] = shift
+            self.modifiers['det_vrt'] = shift * self.det_pixel[0]
 
         # Center the volume around the new axis:
         self.translate_volume([0, 0, shift])
@@ -194,16 +228,17 @@ class geometry(subclass):
         '''
         Compute the shift of the volume central point [x, y, z] due to offsets in the optical and rotation axes.
         '''    
-        hrz = (self.modifiers['det_hrz'] * self.src2obj + self.modifiers['src_hrz'] * self.det2obj) / self.src2det
-        vrt = (self.modifiers['det_vrt'] * self.src2obj + self.modifiers['src_vrt'] * self.det2obj) / self.src2det
+        hrz = 3 * (abs(self.modifiers['det_hrz'] * self.src2obj + self.modifiers['src_hrz'] * self.det2obj) / self.src2det - self.modifiers['axs_hrz'])  
+        #vrt = (self.modifiers['det_vrt'] * self.src2obj + self.modifiers['src_vrt'] * self.det2obj) / self.src2det
+        vrt = abs(self.modifiers['det_vrt'] * self.src2obj + self.modifiers['src_vrt'] * self.det2obj) / self.src2det - self.modifiers['vol_z_tra']
         
         # Take into account global shifts:
-        hrz = numpy.max([numpy.abs(hrz + self.modifiers['vol_x_tra']), hrz + numpy.abs(self.modifiers['vol_y_tra'])])
-        vrt += self.modifiers['vol_z_tra']
+        #hrz = numpy.max([numpy.abs(hrz + self.modifiers['vol_x_tra']), hrz + numpy.abs(self.modifiers['vol_y_tra'])])
+        #vrt += self.modifiers['vol_z_tra']
         
-        return [hrz, vrt]
+        return [hrz / self.det_pixel[1], vrt / self.det_pixel[0]]
     
-    # Set/Get methods (very bodring part of code but, hopefully, it will make geometry look prettier from outside):       
+    # Set/Get methods (very bodring part of code but, hopefully, it will make geometry look prettier from outside):      
         
     @property
     def src2obj(self):
@@ -239,11 +274,11 @@ class geometry(subclass):
         
     @property
     def img_pixel(self):
-        return [self._det_pixel[0] / self.magnification, self._det_pixel[1] / self.magnification]   
+        return [self._det_pixel[0] / self.magnification, self._det_pixel[1] / self.magnification]  
         
     @img_pixel.setter
     def img_pixel(self, img_pixel):
-        self._det_pixel = [img_pixel[0] * self.magnification, img_pixel[1] * self.magnification]         
+        self._det_pixel = [img_pixel[0] * self.magnification, img_pixel[1] * self.magnification]        
         
     @property
     def det_size(self):
@@ -258,18 +293,19 @@ class geometry(subclass):
     def thetas(self):
         dt = 1#self._parent._data_sampling
         
-        if self._parent.data.shape[1] != numpy.size(self._thetas[::dt]):
-            self._parent.warning('Length of thetas array is not consistent with the data shape! Will try to initialize thetas using the data shape.')
+        if not self._parent.data._data is None:
+            if self._parent.data.shape[1] != numpy.size(self._thetas[::dt]):
+                self._parent.message('Initializing thetas using the data shape.')
             
-            self.init_thetas(theta_n = self._parent.data.shape[1])
+                self.init_thetas(theta_n = self._parent.data.shape[1])
             
         return numpy.array(self._thetas[::dt])
         
     @thetas.setter
     def thetas(self, thetas):
-        dt = 1 #self._parent._data_sampling
+        #dt = 1 #self._parent._data_sampling
         
-        self._thetas[::dt] = numpy.array(thetas)
+        self._thetas = numpy.array(thetas)
     
     @property
     def theta_n(self):
@@ -277,12 +313,15 @@ class geometry(subclass):
         
     @property
     def theta_range(self):
-        return (self.thetas[0], self.thetas[-1])
-     
+        if self.thetas.size > 0:
+            return (self.thetas[0], self.thetas[-1])
+        else:
+            return (0, 0)
+    
     @theta_range.setter    
     def theta_range(self, theta_range):
         # Change the theta range:
-        len = numpy.size(self.thetas)     
+        len = numpy.size(self.thetas)    
         
         if len > 2:
             self.thetas = numpy.linspace(theta_range[0], theta_range[1], len)
@@ -316,8 +355,7 @@ class meta(subclass):
         self.geometry = geometry(self._parent)
         
     physics = {'voltage': 0, 'current':0, 'exposure': 0}
-    lyrics = ''
-    
+    lyrics = {}
         
 # **************************************************************
 #           DATA class
@@ -370,7 +408,7 @@ class data(subclass):
         
         # Return reference image for the current projection:
         if self._ref.ndim > 2:
-           
+          
             if self._data is None:
                 self._parent.warning('No raw data available. We don`t know how many projections there are in order to interpolate the reference image properly. Read raw data first.')
                 dsz = self._ref.shape[1]
@@ -380,7 +418,7 @@ class data(subclass):
                 
             # Several flat field images are available:
             ref = self._ref
-           
+          
             sz = ref.shape
 
             # This implementation is too slow:
@@ -388,7 +426,7 @@ class data(subclass):
             #interp_grid  = numpy.array(numpy.meshgrid(numpy.arange(sz[0]), proj_num, numpy.arange(sz[2])))
             #interp_grid = numpy.transpose(interp_grid, (2,1,3,0))
             #original_grid = (numpy.arange(sz[0]), proj_index, numpy.arange(sz[2]))
-            #return interp_sc.interpn(original_grid, ref, interp_grid) 
+            #return interp_sc.interpn(original_grid, ref, interp_grid)
             
             proj_index = numpy.linspace(0, sz[1]-1, dsz)
             
@@ -396,41 +434,44 @@ class data(subclass):
             fract = a - numpy.floor(a)            
             a = int(numpy.floor(a))            
             
-            if a < (dsz-1): 
+            if a < (dsz-1):
                 b = int(numpy.ceil(proj_index[proj_num]))
-            else: 
+            else:
                 b = a
                 
             return self._ref[:, a, :] * (1 - fract) + self._ref[:, b, :] * fract
-           
+          
         else:
             
-           # One flat field image is available: 
+           # One flat field image is available:
            return self._ref  
-           
-    def float32_to_uint8(self):       
-        mn = self._data.min()   
-        mx = self._data.max()   
+          
+    def float32_to_uint8(self):      
+        mn = self._data.min()  
+        mx = self._data.max()  
     
         self._data = numpy.uint8((self._data - mn) / (mx - mn) * 255)
         
         return mn, mx
         
-    def float32_to_uint16(self):       
-        mn = self._data.min()   
-        mx = self._data.max()   
+    def float32_to_uint16(self):      
+        mn = self._data.min()  
+        mx = self._data.max()  
     
         self._data = numpy.uint16((self._data - mn) / (mx - mn) * 65535)
         
         return mn, mx
         
-    def float32_to_float16(self):       
+    def float32_to_float16(self):      
         self._data = numpy.float16(self._data)
         
         return self._data.min(), self._data.max()    
         
     @property        
     def shape(self):
+        if self._data is None:
+            return numpy.array([0,0])
+                              
         dx = self._parent._data_sampling[1]
         dz = self._parent._data_sampling[0]
         dt = 1#self._parent._data_sampling
@@ -498,9 +539,9 @@ def sort_natural(files):
 
     return files
 
-def read_image_stack(file):
+def read_image_stack(file, index_step = 1):
     '''
-    Read a stack of some image files
+    Read a stack of some image files.
     '''
     # Remove the extention and the last few letters:
     name = os.path.basename(file)
@@ -526,16 +567,22 @@ def read_image_stack(file):
     image = misc.imread(files[0], flatten= 0)
     sz = numpy.shape(image)
     
-    data = numpy.zeros((len(files), sz[0], sz[1]), dtype = numpy.float32)
+    file_n = len(files)//index_step
+    
+    data = numpy.zeros((file_n, sz[0], sz[1]), dtype = numpy.float32)
 
     # Read all files:
-    ii = 0
-    for filename in files:
+    for ii in range(file_n):
+        
+        filename = files[ii*index_step]
         a = misc.imread(filename, flatten= 0)
         if a.ndim > 2:
           a = a.mean(2)
+          
         data[ii, :, :] = a
-        ii = ii + 1
+
+        print("\r Progress {:2.1%}".format((ii+1) / numpy.shape(files)[0] * index_step), end=" ")        
+        
 
     print(ii, 'files were loaded.')
 
@@ -558,12 +605,13 @@ class io(subclass):
     '''
 
     path = ''
+    options = {'index_range':[], 'index_step':1, 'x_range':[], 'y_range':[]}
 
     #settings = {'sort_by_date':False}
     
     # Private helper routines:
     def _make_path(self, path):
-        '''
+        '''====
         Make path if it doesn't exist.
         '''    
         if not os.path.exists(path):
@@ -591,22 +639,47 @@ class io(subclass):
         '''
         prnt = self._parent
         # Initialize the geometry data:
-        prnt.meta.geometry.initialize(src2obj, det2obj, det_pixel, theta_range, theta_n) 
+        prnt.meta.geometry.initialize(src2obj, det2obj, det_pixel, theta_range, theta_n)
         
         # Make an empty projections:        
-        prnt.data._data = (numpy.zeros([det_height, theta_n, det_width]))
+        prnt.data._data = numpy.zeros([det_height, theta_n, det_width], dtype = 'float32')
         prnt.meta.history.add_record('io.manual_init')
-
-    def read_raw(self, path = '', filter = '', projections = True, index_range = [], y_range = [], x_range = []):   
+      
+    def read_raw(self, path = '', filter = '', projections = True):
         '''
-        Read projection files automatically.
-        This will look for files with numbers in the last 4 letters of their names.
+        Keep this function for back-compatibility. Use read_projections or read_slices instead!
+        '''
+        if projections:
+            self.read_projections(path, filter)
+        else:
+            self.read_slices(path, filter)
+                
+    def read_projections(self, path = '', filter = ''):
+        '''
+        Read projection data.
+        '''
+        self.read_slices(path, filter)
+            
+        # Transpose to satisfy ASTRA dimensions if loading projection data:
+        
+        self._parent.data._data = numpy.transpose(self._parent.data._data, (1, 0, 2))
+        self._parent.data._data = numpy.flipud(self._parent.data._data)
+        #self._parent.data._data = numpy.ascontiguousarray(self._parent.data._data, dtype=numpy.float32)
+        
+    def read_slices(self, path = '', filter = ''):
+        '''
+        Read images.
         '''
         path = self._update_path(path)
 
         # Free memory:
         self._parent.data._data = None
         gc.collect()
+        
+        index_range = self.options['index_range']
+        index_step = self.options['index_step']
+        y_range = self.options['y_range']
+        x_range = self.options['x_range']
 
         # if it's a file, read all alike, if a directory find a file to start from:
         if os.path.isfile(path):
@@ -646,31 +719,27 @@ class io(subclass):
 
             print('Reading a stack of images')
             print('Seed file name is:', filename)
+            if index_step > 0:
+                print('Reading every %d-nd(rd) image.' % index_step)
             #srt = self.settings['sort_by_date']AMT24-25-SU1/
 
         if self._parent:
-            self._parent.data._data = (read_image_stack(os.path.join(path,filename)))
+            self._parent.data._data = read_image_stack(os.path.join(path,filename), index_step)
         else:
-            return read_image_stack(os.path.join(path,filename))
+            return read_image_stack(os.path.join(path,filename), index_step)
 
-        
         # Trim the data with the provided inputs
         if (index_range != []):
             print(index_range)
             self._parent.data._data = self._parent.data._data[index_range[0]:index_range[1], :, :]
+
         if (y_range != []):
             self._parent.data._data = self._parent.data._data[:, y_range[0]:y_range[1], :]
         if (x_range != []):
             self._parent.data._data = self._parent.data._data[:, :, x_range[0]:x_range[1]]
 
-        # Transpose to satisfy ASTRA dimensions if loading projection data:
-        if projections:
-            self._parent.data._data = numpy.transpose(self._parent.data._data, (1, 0, 2))
-            self._parent.data._data = numpy.flipud(self._parent.data._data)
-            self._parent.data._data = numpy.ascontiguousarray(self._parent.data._data, dtype=numpy.float32)
-
         # add record to the history:
-        self._parent.meta.history.add_record('io.read_raw', path)
+        self._parent.meta.history.add_record('io.read_slices', path)
 
     def read_ref(self, path_files):
         '''
@@ -684,7 +753,7 @@ class io(subclass):
             
         elif type(path_files) == list:
             for file in path_files:
-                ref.append(numpy.flipud(misc.imread(file, flatten= 0)))   
+                if os.path.isfile(file): ref.append(numpy.flipud(misc.imread(file, flatten= 0)))
                 
         else:
             self._parent.error('path_files parameter in read_ref() should be iether a full file name or a list of file names')
@@ -791,9 +860,13 @@ class io(subclass):
         
         self.read_ref([path + '/io0000.tif', path + '/io0001.tif'])
         
-        self.read_raw(path)
+        self.read_projections(path)
         
         self.read_meta(path + '', kind = 'flexray')
+        
+        # Introduce a default shift of the center of rotation. Override if needed.
+        shift = 0.5 / self._parent.meta.geometry.img_pixel[0]
+        self._parent.meta.geometry.set_rotation_axis(- shift, additive=True)
         
     # **************************************************************
     # Parsers for metadata files
@@ -814,7 +887,7 @@ class io(subclass):
             log_file = os.path.join(path, log_file[0])
         else:
             log_file = os.path.join(path, log_file[0])
-       
+      
         # Create an empty dictionary:
         records = {}
 
@@ -828,7 +901,7 @@ class io(subclass):
 
                 # If there is unit after the value:
                 if len(var.split()) > 1:
-                    unit = var.split()[1]
+                    unit = '[' + var.split()[1] + ']'
                     var = var.split()[0]
 
                 # If name contains one of the keys (names can contain other stuff like units):
@@ -841,7 +914,7 @@ class io(subclass):
         # Convert the geometry dictionary to geometry object:
         self._parent.meta.geometry.src2obj = records['src2obj']
         self._parent.meta.geometry.det2obj = records['det2obj']
-        self._parent.meta.geometry.det_pixel = [records['det_pixel'], records['det_pixel']] * self._parse_unit('um') 
+        self._parent.meta.geometry.det_pixel = [records['det_pixel'], records['det_pixel']] * self._parse_unit('[um]')
         self._parent.meta.geometry.theta_range = [0, 2*numpy.pi]
         
         # Set some physics properties:
@@ -849,20 +922,29 @@ class io(subclass):
         self._parent.meta.physics['power'] = records['power']
         self._parent.meta.physics['current'] = records['current']
 
-    def _parse_flexray_meta(self, path = ''):
+    def _parse_keywords(self, path, keywords, file_mask = '.log', separator = ':'):
         '''
-        Use this routine to parse 'scan settings.txt' file generated by FlexRay machine
+        Parse a text file using the keywords dictionary and create a dictionary with values.
+        
+        Args:
+                path : Path to file
+                file_mask : Part of the file's name
+                separator : Seprates names of records from values in the log file
+                keywords: Keywords to look for inside the file
+                
+         Returns:
+               dictionary of the parsed values.
         '''
         path = self._update_path(path)
 
         # Try to find the log file in the selected path
-        log_file = [x for x in os.listdir(path) if (os.path.isfile(os.path.join(path, x)) and 'settings.txt' in os.path.join(path, x))]
+        log_file = [x for x in os.listdir(path) if (os.path.isfile(os.path.join(path, x)) and file_mask in os.path.join(path, x))]
 
+        # Check if there is one file:
         if len(log_file) == 0:
             raise FileNotFoundError('Log file not found in path: ' + path)
             
         if len(log_file) > 1:
-            #raise UserWarning('Found several log files. Currently using: ' + log_file[0])
             self._parent.warning('Found several log files. Currently using: ' + log_file[0])
             log_file = os.path.join(path, log_file[0])
         else:
@@ -871,38 +953,146 @@ class io(subclass):
         # Create an empty dictionary:
         records = {}
 
-        # Create a dictionary of keywords (skyscan -> our geometry definition):
-        geom_dict = {'voxel size':'img_pixel', 'sod':'src2obj', 'sdd':'src2det', '# projections':'theta_n',
-                     'last angle':'last_angle', 'start angle':'first_angle', 'tube voltage':'voltage', 'tube power':'power', 'Exposure time (ms)':'exposure'}
-
+        # Loop to read the file record by record:
         with open(log_file, 'r') as logfile:
             for line in logfile:
-                name, var = line.partition(":")[::2]
+                name, var = line.partition(separator)[::2]
                 name = name.strip().lower()
-
+                
                 # If name contains one of the keys (names can contain other stuff like units):
-                geom_key = [geom_dict[key] for key in geom_dict.keys() if key in name]
+                geom_key = [keywords[key] for key in keywords.keys() if key in name]
 
+                # Collect record values:
                 if geom_key != []:
-                    #factor = self._parse_unit(name)
-                    factor = 1 # there are no units mentioned in flexray file
-                    records[geom_key[0]] = float(var)*factor
+                    
+                    # Look for unit description in the name:
+                    factor = self._parse_unit(name)
+                    
+                    # If needed separate the var and save the number of save the whole string:
+                    try:
+                        records[geom_key[0]] = float(var.split()[0]) * factor
+                    except:
+                        records[geom_key[0]] = var
 
-        # Convert the geometry dictionary to geometry object:        
-        self._parent.meta.geometry.src2obj = records['src2obj']
-        self._parent.meta.geometry.det2obj = records['src2det'] - records['src2obj']
-        self._parent.meta.geometry.img_pixel = [records['img_pixel'] * self._parse_unit('um'), records['img_pixel'] * self._parse_unit('um')]  
-        self._parent.meta.geometry.theta_range = [records['first_angle']* self._parse_unit('deg'), records['last_angle']* self._parse_unit('deg')] 
+                    #print('Parsed:')
+                    #print(line)
+                    #print(var)
+                    #print(records[geom_key[0]])
+                    #print(name)
+                    #print(factor)
+                    #float(var.split()[0])
+                    
+                else:
+                    pass
+                    #print('Not parsed:')
+                    #print(line)
+        return records
         
-        if self._parent.data.data.size > 0:                                              
-            self._parent.meta.geometry.init_thetas(theta_n = self._parent.data.shape[1])
+    def _keywords_to_geometry(self, records):
+        '''
+        Convert parsed records to parameters in the geometry class.
+        '''
+        meta = self._parent.meta
+                
+        # Convert the geometry dictionary to geometry object:        
+        meta.geometry.src2obj = records.get('src2obj')
+        meta.geometry.det2obj = records.get('src2det') - records.get('src2obj')        
+        meta.geometry.img_pixel = [records.get('img_pixel') * self._parse_unit('[um]'), records.get('img_pixel') * self._parse_unit('[um]')]  
+        #meta.geometry.img_pixel = [records.get('img_pixel'), records.get('img_pixel') ]  
 
+        try:                                                
+            meta.geometry.theta_range = [records.get('first_angle') * self._parse_unit('[deg]'), records.get('last_angle') * self._parse_unit('[deg]')]
+        except:
+            meta.geometry.theta_range = [0* self._parse_unit('[deg]'), 360* self._parse_unit('[deg]')]
+        
+        if self._parent.data._data != []:
+            meta.geometry.init_thetas(theta_n = self._parent.data.shape[1])
+            
         # Set some physics properties:
-        self._parent.meta.physics['voltage'] = records.get('voltage')
-        self._parent.meta.physics['power'] = records.get('power')
-        self._parent.meta.physics['current'] = records.get('current')
-        self._parent.meta.physics['current'] = records.get('exposure')
+        meta.physics['binning'] = records.get('binning')
+        meta.physics['averages'] = records.get('averages')
+        meta.physics['voltage'] = records.get('voltage')
+        meta.physics['power'] = records.get('power')
+        meta.physics['current'] = records.get('current')
+        meta.physics['exposure'] = records.get('exposure')
+        meta.physics['mode'] = records.get('mode')
+        meta.physics['filter'] = records.get('filter')
+        
+        #print(records.get('name'))
+        meta.lyrics['sample name'] = records.get('name')
+        meta.lyrics['comments'] = records.get('comments')
+        meta.lyrics['date'] = records.get('date')
+        meta.lyrics['duration'] = records.get('duration')
+                
+    def _keywords_to_modifiers(self, records):    
+        
+        meta = self._parent.meta
+        
+        # Set up modifiers (keep them in mm, so if the pixel size changes, they still work properly):
+        meta.geometry.modifiers['det_vrt'] = records['det_vrt']
+        meta.geometry.modifiers['det_hrz'] = records['det_hrz']
+        meta.geometry.modifiers['src_vrt'] = records['src_vrt']
+        meta.geometry.modifiers['src_hrz'] = records['src_hrz']
+        meta.geometry.modifiers['axs_hrz'] = records['axs_hrz']
+        meta.geometry.modifiers['vol_z_tra'] = records['vol_z_tra']
+        
+    def _parse_flexray_meta(self, path = ''):
+        '''
+        Use this routine to parse 'scan settings.txt' file generated by FlexRay machine.
+        '''
+        # Dictionary that describes the Flexray file:        
+        keywords = {'voxel size':'img_pixel',
+                        'sod':'src2obj',
+                        'sdd':'src2det',
+                        
+                        'ver_tube':'src_vrt',
+                        'ver_det':'det_vrt',
+                        'tra_det':'det_hrz',
+                        'tra_obj':'axs_hrz',
+                        'tra_tube':'src_hrz',
+                        
+                        'Sample name' : 'comments',
+                        'Comment' : 'name',
+                        
+                        '# projections':'theta_n',
+                        'last angle':'last_angle',
+                        'start angle':'first_angle',
+                        'tube voltage':'voltage',
+                        'tube power':'power',
+                        'number of averages':'averages',
+                        'imaging mode':'mode',
+                        'binning value':'binning',
+                        'roi (ltrb)':'roi',
+                        'date':'date',
+                        'scan duration':'duration',
+                        'filter':'filter',
+                        
+                        'exposure time (ms)':'exposure'}
 
+        # Read recods from the file:
+        records = self._parse_keywords(path, keywords, file_mask = 'settings.txt', separator = ':')
+        
+        # Parse the file:
+        self._keywords_to_geometry(records)
+        
+        # Fix some Flex ray hardware-specific stuff:
+        records['det_hrz'] += 24
+        
+        records['src_vrt'] -= 5
+        vol_center = (records['det_vrt'] + records['src_vrt']) / 2
+        records['vol_z_tra'] = vol_center
+        
+        # Compute the center of the detector:
+        roi = numpy.int32(records.get('roi').split(sep=','))
+        centre = [(roi[0] + roi[2]) // 2 - 971, (roi[1] + roi[3]) // 2 - 767]
+        
+        # Take into account the ROI of the detector:
+        records['det_vrt'] += centre[1] / records.get('binning')
+        records['det_hrz'] += centre[0] / records.get('binning')
+        
+        # Translate the records to modifiers:
+        self._keywords_to_modifiers(records)
+            
     def _parse_skyscan_meta(self, path = ''):
 
         path = self._update_path(path)
@@ -949,7 +1139,7 @@ class io(subclass):
                         records[geom_key[0]] = False
                     else:
                         records[geom_key[0]] = True
-     
+    
         # Convert the geometry dictionary to geometry object:        
         self._parent.meta.geometry.src2obj = records['src2obj']
         self._parent.meta.geometry.det2obj = records['src2det'] - records['src2obj']
@@ -972,27 +1162,32 @@ class io(subclass):
         
         # Convert detector tilt into radian units (degrees assumed)
         if 'det_tilt' in geometry:
-            self._parent.meta.geometry.modifiers['det_rot'] = records['det_tilt'] * self._parse_unit('deg')
+            self._parent.meta.geometry.modifiers['det_rot'] = records['det_tilt'] * self._parse_unit('[deg]')
             
     def _parse_unit(self, string):
-            # Look at the inside of trailing parenthesis
-            unit = ''
-            factor = 1.0
-            if string[-1] == ')':
-                unit = string[string.rfind('(')+1:-1].strip().lower()
-            else:
-                unit = string.strip().lower()
+        '''
+        Look for units in the string and return a factor that converts this unit to Si.
+        '''
+        # Look at the inside a braket:
+        if '[' in string:
+            string = string[string.index('[')+1:string.index(']')]
+                        
+        elif '(' in string:
+            string = string[string.index('(')+1:string.index(')')]
 
-            units_dictionary = {'um':0.001, 'mm':1, 'cm':10.0, 'm':1e3, 'rad':1, 'deg':numpy.pi / 180.0, 'ms':1, 's':1e3, 'us':0.001, 'kev':1, 'mev':1e3, 'ev':0.001,
-                                'kv':1, 'mv':1e3, 'v':0.001, 'ua':1, 'ma':1e3, 'a':1e6, 'line':1}    
-            
-            if unit in units_dictionary.keys():
-                factor = units_dictionary[unit]
-            else:
-                factor = 1
-                self._parent.warning('Unknown unit: ' + unit + '. Skipping.')
+        else:
+            return 1
+                
+        # Here is what we are looking for:
+        units_dictionary = {'um':0.001, 'mm':1, 'cm':10.0, 'm':1e3, 'rad':1, 'deg':numpy.pi / 180.0, 'ms':1, 's':1e3, 'us':0.001, 'kev':1, 'mev':1e3, 'ev':0.001,
+                            'kv':1, 'mv':1e3, 'v':0.001, 'ua':1, 'ma':1e3, 'a':1e6, 'line':1}    
+                            
+        factor = [units_dictionary[key] for key in units_dictionary.keys() if key == string]
+        
+        if factor == []: factor = 1
+        else: factor = factor[0]
 
-            return factor            
+        return factor            
         
     
     def read_skyscan_thermalshifts(self, path = ''):
@@ -1068,7 +1263,7 @@ class io(subclass):
                 im[:data.shape[0], margin:(margin+data.shape[2])] = data[:,ii,:]
             elif axis == 2:
                 im[:data.shape[0], margin:(margin+data.shape[1])] = data[:,:,ii]
-                   
+                  
             misc.imsave(name = os.path.join(path, fname_tmp), arr = im)
             
             print("\r Progress {:2.1%}".format((ii+1) / data.shape[axis]), end=" ")        
@@ -1171,16 +1366,15 @@ class display(subclass):
     '''
     This is a collection of display tools for the raw and reconstructed data
     '''
-    
     def __init__(self, parent = []):
         subclass.__init__(self, parent)
         
-        self._cmap = 'gray'
+        self._cmap = 'magma'
         self._dynamic_range = []
         self._mirror = False
         self._upsidedown = False
         
-    def set_options(self, cmap = 'gray', dynamic_range = [], mirror = False, upsidedown = False):    
+    def set_options(self, cmap = 'magma', dynamic_range = [], mirror = False, upsidedown = False):    
         '''
         Set options for visualization.
         '''
@@ -1213,9 +1407,23 @@ class display(subclass):
         if mirror: img = numpy.fliplr(img)
         if upsidedown: img = numpy.flipud(img)
         
-        #plt.imshow(img, cmap = self._cmap, origin='lower', vmin = self._dynamic_range[0], vmax =self._dynamic_range[1])
-        plt.imshow(img, cmap = self._cmap, origin='lower')
-        plt.colorbar()
+        if self._dynamic_range != []:
+            im = plt.imshow(img, cmap = self._cmap, origin='lower', vmin = self._dynamic_range[0], vmax =self._dynamic_range[1])
+        else:
+            im = plt.imshow(img, cmap = self._cmap, origin='lower')
+            
+        # Avoid creating colorbar twice:
+        '''    
+        ax=plt.gca()  
+        im = ax.images
+        col = im[-1].colorbar
+
+        if col is None:
+            plt.colorbar(shrink=0.5)
+            
+        else:
+            col.set_clim()
+        '''    
         plt.show()
         plt.pause(0.0001)
 
@@ -1246,7 +1454,11 @@ class display(subclass):
         self._figure_maker_(fig_num)
 
         img = self._parent.data.data.sum(dim_num)
-        plt.imshow(img, cmap = self._cmap)
+        
+        if self._dynamic_range != []:
+            plt.imshow(img, cmap = self._cmap, origin='lower', vmin = self._dynamic_range[0], vmax =self._dynamic_range[1])
+        else:
+            plt.imshow(img, cmap = self._cmap)
         
         plt.colorbar()
         plt.show()
@@ -1259,7 +1471,11 @@ class display(subclass):
         self._figure_maker_(fig_num)
 
         img = self._parent.data.data.max(dim_num)
-        plt.imshow(img, cmap = self._cmap)
+        
+        if self._dynamic_range != []:
+            plt.imshow(img, cmap = self._cmap, origin='lower', vmin = self._dynamic_range[0], vmax =self._dynamic_range[1])
+        else:
+            plt.imshow(img, cmap = self._cmap)
         
         plt.colorbar()
         plt.show()
@@ -1272,7 +1488,11 @@ class display(subclass):
         self._figure_maker_(fig_num)
 
         img = self._parent.data.data.min(dim_num)
-        plt.imshow(img, cmap = self._cmap)
+        
+        if self._dynamic_range != []:
+            plt.imshow(img, cmap = self._cmap, origin='lower', vmin = self._dynamic_range[0], vmax =self._dynamic_range[1])
+        else:
+            plt.imshow(img, cmap = self._cmap)
         
         plt.colorbar()
         plt.show()
@@ -1282,6 +1502,8 @@ class display(subclass):
         '''
         Use mayavi to view the volume slice by slice
         '''
+        from mayavi import mlab
+        
         data = self._parent.data.data.copy()
 
         # Clip intensities if needed:
@@ -1300,6 +1522,9 @@ class display(subclass):
         '''
         Render volume using mayavi routines
         '''
+        from mayavi import mlab
+        from tvtk.util.ctf import ColorTransferFunction
+        
         data = self._parent.data.data.copy()
 
         # Clip intensities if needed:
@@ -1349,14 +1574,20 @@ class analyse(subclass):
         return numpy.max(self._parent.data.data)
 
     def center_of_mass(self):
-        return measurements.center_of_mass(self._parent.data.data.max(1))
+        '''
+        Return the center of mass**2 (power is there to avoid influence of small values).
+        '''
+        return measurements.center_of_mass(self._parent.data.data.sum(1) ** 4)
 
-    def histogram(self, nbin = 256, plot = True, log = False):
+    def histogram(self, nbin = 256, plot = True, log = False, slice_num = []):
 
         mi = self.min()
         ma = self.max()
 
-        a, b = numpy.histogram(self._parent.data.data, bins = nbin, range = [mi, ma])
+        if slice_num == []:
+            a, b = numpy.histogram(self._parent.data.data, bins = nbin, range = [mi, ma])
+        else:
+            a, b = numpy.histogram(self._parent.data.data[:,slice_num,:], bins = nbin, range = [mi, ma])
 
         # Set bin values to the middle of the bin:
         b = (b[0:-1] + b[1:]) / 2
@@ -1387,6 +1618,21 @@ class process(subclass):
     '''
     Various preprocessing routines
     '''
+    def threshold(self, threshold = None, binary = True):
+        '''
+        Apply simple segmentation or discard small values.
+        '''
+        volume = self._parent
+        
+        if threshold is None:
+            #threshold = volume.analyse.max() / 2
+            threshold = (numpy.percentile(volume.data.data, 98)+numpy.percentile(volume.data.data, 90) ) / 2
+        
+        if binary:
+            volume.data._data = numpy.array((volume.data._data > threshold) * 1.0, dtype = 'float32')
+        else:
+            volume.data._data[volume.data._data < threshold] = 0
+
     def arbitrary_function(self, func):
         '''
         Apply an arbitrary function:
@@ -1425,6 +1671,27 @@ class process(subclass):
         self._parent.meta.history.add_record('residual_rings', 1)
         self._parent.message('Residual ring correcion applied.')
 
+    def subtract_air(self, air_val = []):
+        '''
+        Subtracts a coeffificient from each projection, that equals to the intensity of air.
+        We are assuming that air will produce highest peak on the histogram.
+        '''
+        
+        if air_val == []:
+                # We will use 12 bit precision to compute the position of the peak
+                y, x = self._parent.analyse.histogram(nbin = 2**12, plot = False)
+        else:
+            arg = air_val
+            
+        # Subtract maximum argument:    
+        arg = x[y.argmax()]
+        
+        print('Air intensity of ', arg, ' will be subtracted.')        
+        self._parent.data._data -= arg
+                  
+        self._parent.meta.history.add_record('subtract_air', arg)
+        
+    
     def medipix_quadrant_shift(self):
         '''
         Expand the middle line
@@ -1465,7 +1732,7 @@ class process(subclass):
             air_values = air_values.reshape((air_values.shape[0],air_values.shape[1],1))
             self._parent.data.data = self._parent.data.data / air_values
             
-            # add a record to the history: 
+            # add a record to the history:
             self._parent.meta.history.add_record('process.flat_field', 'skyscan')
 
             self._parent.message('Skyscan flat field correction applied.')
@@ -1486,7 +1753,9 @@ class process(subclass):
                 # If there is dark field, use it.
                 if not self._parent.data._dark is None:    
                     self._parent.data.data[:, ii, :] = self._parent.data.data[:, ii, :] - self._parent.data._dark
-                    ref = ref - self._parent.data._dark
+
+                    # Is dark subtracted from ref images internally?
+                    #ref = ref - self._parent.data._dark
                     
                 # Use flat field:
                 self._parent.data.data[:, ii, :] = self._parent.data.data[:, ii, :] / ref    
@@ -1551,11 +1820,12 @@ class process(subclass):
             
         # Apply a bound to large values:
         numpy.clip(self._parent.data.data, a_min = numpy.exp(-upper_bound), a_max = numpy.exp(-lower_bound), out = self._parent.data.data)
-                   
+                  
         # In-place negative logarithm
         numpy.log(self._parent.data.data, out = self._parent.data.data)
         numpy.negative(self._parent.data.data, out = self._parent.data.data)
-        self._parent.data.data = numpy.float32(self._parent.data.data)
+        self._parent.data.data = numpy.float32(self._parent.data.data)        
+        self._parent.data._data = numpy.ascontiguousarray(self._parent.data._data, dtype=numpy.float32)
         
         self._parent.message('Logarithm is applied.')
         self._parent.meta.history.add_record('process.log(air_intensity, bounds)', [air_intensity, lower_bound, upper_bound])
@@ -1575,6 +1845,16 @@ class process(subclass):
 
         self._parent.meta.history.add_record('process.salt_pepper(kernel)', kernel)
 
+    def add_noise(self, std, mode = 'gaussian'):
+        '''
+        Noisify the projection data!
+        '''
+        from skimage import util
+        
+        self._parent.data.data = util.random_noise(self._parent.data.data, mode = mode, var = std**2)
+        
+        self._parent.meta.history.add_record('process.add_noise(std, mode)', [std, mode])
+        
     def simple_tilt(self, tilt):
         '''
         Tilts the sinogram
@@ -1606,7 +1886,7 @@ class process(subclass):
         # Convert projections to indexes:
         xproj = numpy.where(xproj > 0)
         yproj = numpy.where(yproj > 0)
-                   
+                  
         crop_length_x = numpy.min([xproj[0] -5, self._parent.data._data.shape[2]-6 - xproj[-1]])
         crop_length_y = numpy.min([yproj[0] -5, self._parent.data._data.shape[0]-6 - yproj[-1]])
         
@@ -1640,6 +1920,9 @@ class process(subclass):
 
         self._parent.data._data = numpy.ascontiguousarray(self._parent.data._data, dtype=numpy.float32)
         gc.collect()
+        
+        if numpy.min(self._parent.data._data.shape) == 0:
+            self._parent.warning('Wow! We have just cropped the data to death! No data left.')
 
         self._parent.meta.history.add_record('process.ccrop(top_left, bottom_right)', [top_left, bottom_right])
 
@@ -1659,7 +1942,7 @@ class process(subclass):
         
     def equivalent_thickness(self, energy, spectrum, compound, density):
         '''
-        Transfer intensity values to equivalent thickness
+        Transfer intensity values to equivalent thicknessb
         '''
         sino = self._parent.data._data
         
@@ -1694,10 +1977,21 @@ class process(subclass):
         print('Data intensity range:', [sino.min(), sino.max()])
 
         print('Applying transfer function.')    
-        sino_interp = numpy.interp(sino, synth_counts, thickness)
         
-        self._parent.data._data = numpy.array(sino_interp, dtype = 'float32')
+        sz = self._parent.data._data.shape[0]
+
+        for ii in range(sz):
+            self._parent.data._data[ii,:,:] = numpy.array(numpy.interp(sino[ii,:,:], synth_counts, thickness), dtype = 'float32')
+            print("\r Progress {:2.1%}".format((ii+1) / sz), end=" ")            
         
+    def bin_thetas(self):
+        '''
+        Bin data in angles.
+        '''
+        prnt = self._parent
+        prnt.data._data = (prnt.data._data[:, 0:-1:2, :] + prnt.data._data[:, 1::2, :]) / 2
+        prnt.meta.geometry._thetas = (prnt.meta.geometry.thetas[0:-1:2] + prnt.meta.geometry.thetas[1::2]) / 2
+                                      
     def bin_projections(self, bin_theta = False):
         '''
         Bin data with a factor of two in detector plane.
@@ -1705,20 +1999,24 @@ class process(subclass):
         print('Binning projection data.')    
         
         prnt = self._parent
-        prnt.data._data = (prnt.data._data[:, :, 0:-1:2] + prnt.data._data[:, :, 1::2]) / 2
-        prnt.data._data = (prnt.data._data[0:-1:2, :, :] + prnt.data._data[1::2, :, :]) / 2
+        prnt.data._data[:, :, 0:-1:2] += prnt.data._data[:, :, 1::2]
+        prnt.data._data = prnt.data._data[:, :, 0:-1:2] / 2
 
-        self._parent.meta.geometry.det_pixel = self._parent.meta.geometry.det_pixel * 2
+        prnt.data._data[0:-1:2, :, :] += prnt.data._data[1::2, :, :]
+        prnt.data._data = prnt.data._data[0:-1:2, :, :] / 2
+
+        # Multiply the detecotr pixel width and height:
+        self._parent.meta.geometry.det_pixel[0] = self._parent.meta.geometry.det_pixel[0] * 2
+        self._parent.meta.geometry.det_pixel[1] = self._parent.meta.geometry.det_pixel[1] * 2
         
         if bin_theta:
-            prnt.data._data = (prnt.data._data[:, 0:-1:2, :] + prnt.data._data[:, 1::2, :]) / 2
-            prnt.meta.geometry._thetas = (prnt.meta.geometry.thetas[0:-1:2] + prnt.meta.geometry.thetas[1::2]) / 2
+            self.bin_thetas()
 
 # **************************************************************
 #           OPTIMIZE class and subclasses
 # **************************************************************
 from scipy import optimize as op
-from scipy.optimize import minimize_scalar
+#from scipy.optimize import minimize_scalar
 
 class optimize(subclass):
     '''
@@ -1733,10 +2031,10 @@ class optimize(subclass):
         '''
         # Compute an image from the shifted data:
         if modifier == 'rotation_axis':
-            self._parent.meta.geometry.rotation_axis_shift(value)
+            self._parent.meta.geometry.set_rotation_axis(value)
             
         elif modifier in self._parent.meta.geometry.modifiers.keys():
-            self._parent.meta.geometry.modifiers[modifier] = value           
+            self._parent.meta.geometry.modifiers[modifier] = value / self._parent.meta.geometry.det_pixel[1]          
 
         else:
             self._parent.error('Modifier not found!')
@@ -1747,10 +2045,10 @@ class optimize(subclass):
         # Try to release some memory...
         vol = None
         gc.collect()
-         
+        
         return l2
         
-    @staticmethod     
+    @staticmethod    
     def _parabolic_min(values, index, space):    
         '''
         Use parabolic interpolation to find the extremum close to the index value:
@@ -1763,8 +2061,8 @@ class optimize(subclass):
             denom = (x[0]-x[1]) * (x[0]-x[2]) * (x[1]-x[2])
             A = (x[2] * (y[1]-y[0]) + x[1] * (y[0]-y[2]) + x[0] * (y[2]-y[1])) / denom
             B = (x[2]*x[2] * (y[0]-y[1]) + x[1]*x[1] * (y[2]-y[0]) + x[0]*x[0] * (y[1]-y[2])) / denom
-		 
-            x0 = -B / 2 / A   
+                
+            x0 = -B / 2 / A  
             
         else:
             
@@ -1772,7 +2070,7 @@ class optimize(subclass):
 
         return x0
             
-    @staticmethod         
+    @staticmethod        
     def _full_search(func, bounds, maxiter, args):
         '''
         Performs a full search of a minimum inside the given bounds.
@@ -1789,22 +2087,28 @@ class optimize(subclass):
             print('Step %0d / %0d' % (ii+1, maxiter))
             
             func_values[ii] = func(val, modifier = args)
-            ii += 1           
+            ii += 1          
         
         min_index = func_values.argmin()    
         
         return optimize._parabolic_min(func_values, min_index, space)
     
-    def optimize_rotation_center(self, guess = 0, subscale = 1, full_search = True, center_of_mass = True):
+    def optimize_rotation_center(self, guess = None, subscale = 1, full_search = True, center_of_mass = True):
         '''
-        Find a center of rotation. If you can, use the center_of_mass option to get the initial guess. 
+        Find a center of rotation. If you can, use the center_of_mass option to get the initial guess.
         If that fails - use a subscale larger than the potential deviation from the center. Usually, 8 or 16 works fine!
         '''
         # Usually a good initial guess is the center of mass of the projection data:
-        if  center_of_mass  & (abs(guess)==0):   
+        if  (center_of_mass)  & (guess is None):  
             guess = self._parent.analyse.center_of_mass()[1] - self._parent.data.shape[2] // 2
-            print('The initial guess for the rotation axis shift is %0.2f' % guess)
-
+            print('The initial guess for the rotation axis shift is %0.2f [detector pixels]' % guess)
+            
+        elif guess is None:
+            guess = self._parent.meta.geometry.get_rotation_axis()
+            print('The initial guess for the rotation axis shift is %0.2f [detector pixels]' % guess)
+        
+        print('The old rotation axis: %0.2f [detector pixels]' % self._parent.meta.geometry.get_rotation_axis())    
+        
         # Downscale the data:
         while subscale >= 1:
             
@@ -1812,20 +2116,20 @@ class optimize(subclass):
             if (subscale != 1) & (subscale // 2 != subscale / 2): self._parent.error('Subscale factor should be a power of 2! Aborting...')
             
             self._parent.message('Subscale factor %1d' % subscale)    
-     
+    
             # We will use constant subscale in the vertical direction but vary the horizontal subscale:
             samp =  [10, subscale]
 
             guess = subscale * self._optimize_modifier_subsample(guess / subscale, 'rotation_axis', samp, full_search, display =True)
             
-            self._parent.message('Current guess is %0.2f' % guess)
+            self._parent.message('Current guess is %0.2f [detector pixels]' % guess)
             
             subscale = subscale // 2
             
         self._parent._data_sampling = [1, 1]    
-        self._parent.reconstruct._initialize_ramp_filter(power = 1)    
+        self._parent.reconstruct._initialize_ramp_filter(0)    
                 
-        self._parent.meta.geometry.rotation_axis_shift(guess)
+        self._parent.meta.geometry.set_rotation_axis(guess)
         
         return guess
         
@@ -1862,17 +2166,17 @@ class optimize(subclass):
         '''
         Optimize a modifier using a particular sampling of the projection data.
         '''
-        # 
+        #
         self._parent._data_sampling = samp
         
         # Create a ramp filter so FDK will calculate a gradient:
         self._parent.reconstruct._initialize_ramp_filter(power = 2)
                         
         if full_search:
-            guess = self._full_search(self._modifier_l2cost, bounds = [guess - 2, guess + 2], maxiter = 5, args = modifier) 
+            guess = self._full_search(self._modifier_l2cost, bounds = [guess - 2, guess + 2], maxiter = 5, args = modifier)
 
         else:                    
-            opt = op.minimize(self._modifier_l2cost, x0 = guess, bounds = ((guess - 2, guess + 2),), method='COBYLA', 
+            opt = op.minimize(self._modifier_l2cost, x0 = guess, bounds = ((guess - 2, guess + 2),), method='COBYLA',
                                     options = {'maxiter': 15, 'disp': False}, args = modifier)
             
             guess = opt.x
@@ -1900,8 +2204,12 @@ class reconstruct(object):
     _reconstruction_mask = None
     _projection_filter = None
     
-    # Values for the symmetrical volume crop:
-    _vol_crop = numpy.array([0, 0, 0])
+    # Some options affecting iterative reconstructions:
+    _tile_fringe = 5
+    _poisson_on_fly = False
+    
+    # Values for the symmetrical volume crop (negative means expand the volume):
+    _vol_crop = numpy.zeros(3)
 
     # Display while computing:
     _display_callback = False
@@ -1915,7 +2223,7 @@ class reconstruct(object):
         
     def __init__(self, proj):    
         
-        self._projections = [proj,]           
+        self._projections = [proj,]          
 
     def auto_crop_volume(self, threshold = 0.01):
         '''
@@ -1925,16 +2233,16 @@ class reconstruct(object):
         
         # Donsample the data before reconstructing:
         subsample = 1
-        for stack in self._projections: 
+        for stack in self._projections:
             stack._data_sampling = [subsample, subsample]
 
         print('Calculating downsampled FDK...')
         
         # First compute a downsampled FDK ...
-        self._vol_crop = numpy.array([0, 0, 0])
+        self._vol_crop = numpy.zeros(3)
         vol = self.FDK()                
         
-        for stack in self._projections: 
+        for stack in self._projections:
             stack._data_sampling = [1,1]
         
         # Create projections of the reconstructed volume:
@@ -1974,6 +2282,35 @@ class reconstruct(object):
         '''
         self._projections.append(proj)
         
+    def combine_volumes(self):
+        '''
+        Combine volume positions. Use this when several aligned datasets are combined.
+        Here global rotations of volumes are not taken into accout.
+        '''
+        
+        # Compute average center point:
+        center = numpy.zeros(3)
+        width = numpy.zeros(3)
+        
+        for proj in self._projections:            
+            center += numpy.array([proj.meta.geometry.modifiers['vol_x_tra'], proj.meta.geometry.modifiers['vol_y_tra'], proj.meta.geometry.modifiers['vol_z_tra']])
+            
+        center /= numpy.size(self._projections)
+        
+        for proj in self._projections:            
+            width[0] = numpy.max([width[0], abs(center[0] - proj.meta.geometry.modifiers['vol_x_tra'])])
+            width[1] = numpy.max([width[1], abs(center[1] - proj.meta.geometry.modifiers['vol_y_tra'])])
+            width[2] = numpy.max([width[2], abs(center[2] - proj.meta.geometry.modifiers['vol_z_tra'])])
+            
+        # Overwrite:    
+        for proj in self._projections:            
+            proj.meta.geometry.modifiers['vol_x_tra'] = center[0]
+            proj.meta.geometry.modifiers['vol_y_tra'] = center[1]
+            proj.meta.geometry.modifiers['vol_z_tra'] = center[2]
+
+        # Expand the volume with some margin:
+        self._vol_crop -= width    
+        
     def _total_data_shape(self):
         '''
         Combined length of the projection data along the angular dimension.
@@ -2002,7 +2339,8 @@ class reconstruct(object):
     
         if numpy.size(self._projections) > 1:
             for proj in self._projections[1:]:
-                if shape != proj.data.shape: proj.error('Projection data dimensions are not consistent among datasets.')
+                if (shape != proj.data.shape).any():
+                    proj.error('Projection data dimensions are not consistent among datasets:' + str(shape) +' v.s. '+ str(proj.data.shape))
         
         if numpy.size(self._projections) > 1:
             for proj in self._projections[1:]:
@@ -2018,8 +2356,8 @@ class reconstruct(object):
             for proj in self._projections[1:]:
                 thetas = numpy.append(thetas, self._projections[0].meta.geometry.thetas)
                 
-        return thetas       
-
+        return thetas      
+        
     def initialize_projection_mask(self, weight_poisson = False, weight_histogram = None, pixel_mask = None):
         '''
         Genrate weights proportional to the square root of intensity that map onto the projection data
@@ -2061,19 +2399,22 @@ class reconstruct(object):
                 self._projection_mask = self._projection_mask[:, ii, :] * pixel_mask
 
         self._projection_mask = numpy.array(self._projection_mask, dtype='float32')
-       
+      
         #prnt.message('Projection mask is initialized')
 
     def initialize_reconstruction_mask(self):
         '''
         Make volume mask to avoid projecting errors into the corners of the volume that are not properly sampled.
         '''
-        sz = self._total_data_shape()
-
-        self._reconstruction_mask = numpy.ones([sz[0], sz[2], sz[2]], dtype = 'bool')
+        
+        # SImply to make sure dimensions are consistent, we will initialize ASTRA:
+        self._initialize_astra()
+        sz = astra.functions.geom_size(self.vol_geom)
+        
+        self._reconstruction_mask = numpy.ones(sz, dtype=numpy.bool)
         
         # Loop through all projection datasets:
-        for proj in self._projections:   
+        for proj in self._projections:  
             # compute radius of the defined cylinder
             det_width = sz[2] / 2
             src2obj = proj.meta.geometry.src2obj
@@ -2088,11 +2429,11 @@ class reconstruct(object):
 
             self._reconstruction_mask = numpy.array(xx**2 + yy**2 < radius**2, dtype = 'float32')
 
-            # Replicate to 3D:           
+            # Replicate to 3D:          
             self._reconstruction_mask = (numpy.tile(self._reconstruction_mask[None, :,:], [sz[0], 1, 1]))
             
         self._reconstruction_mask = numpy.ascontiguousarray(self._reconstruction_mask)
-                                                       
+                                                      
         print('Reconstruction mask is initialized')
 
     def _initialize_odl(self):
@@ -2120,7 +2461,7 @@ class reconstruct(object):
         # Ray transform (= forward projection). We use the ASTRA CUDA backend.
         ray_trafo = odl.tomo.RayTransform(space, geometry, impl='astra_cuda')        
         
-        return ray_trafo, space 
+        return ray_trafo, space
         
     def odl_TV(self, iterations = 10, lam = 0.01, min_l1_norm = False):
         '''
@@ -2213,17 +2554,17 @@ class reconstruct(object):
         x = ray_trafo.domain.one()
         
         # FBP:
-        odl.solvers.mlem(ray_trafo, x, numpy.transpose(self._parent.data.data, axes = [1, 2, 0]), 
+        odl.solvers.mlem(ray_trafo, x, numpy.transpose(self._parent.data.data, axes = [1, 2, 0]),
                                 niter = iterations, callback = callback)
         
-        return volume(numpy.transpose(x.asarray(), axes = [2, 0, 1])[:,::-1,:])   
+        return volume(numpy.transpose(x.asarray(), axes = [2, 0, 1])[:,::-1,:])  
     
     ## ******************************** ASTRA ************************************************ ##
     
-    def _modifiers2vectors(self, proj_geom, geom):
+    def _modifiers2vectors(self, proj_geom, geom, det_pixel):
         '''
         Apply arbitrary geometrical modifiers to the ASTRA projection geometry vector
-        ''' 
+        '''
         proj_geom = astra.functions.geom_2vec(proj_geom)
             
         vectors = proj_geom['Vectors']
@@ -2233,56 +2574,63 @@ class reconstruct(object):
             # Define vectors:
             src_vect = vectors[ii, 0:3]    
             det_vect = vectors[ii, 3:6]    
-            det_axis_hrz = vectors[ii, 6:9]           
-            det_axis_vrt = vectors[ii, 9:12]           
+            det_axis_hrz = vectors[ii, 6:9]          
+            det_axis_vrt = vectors[ii, 9:12]
 
             #Precalculate vector perpendicular to the detector plane:
             det_normal = numpy.cross(det_axis_hrz, det_axis_vrt)
             det_normal = det_normal / numpy.sqrt(numpy.dot(det_normal, det_normal))
             
             # Translations relative to the detecotor plane:
+            px = det_pixel
                 
             #Detector shift (V):
-            det_vect += geom.find_modifier('det_vrt', ii) * det_axis_vrt 
+            det_vect += geom.get_modifier('det_vrt', ii) * det_axis_vrt / px[0]
     
             #Detector shift (H):
-            det_vect += geom.find_modifier('det_hrz', ii) * det_axis_hrz
+            det_vect += geom.get_modifier('det_hrz', ii) * det_axis_hrz / px[1]
     
             #Detector shift (M):
-            det_vect += geom.find_modifier('det_mag', ii) * det_normal
+            det_vect += geom.get_modifier('det_mag', ii) * det_normal /  px[1]
     
             #Source shift (V):
-            src_vect += geom.find_modifier('src_vrt', ii) * det_axis_vrt   
+            src_vect += geom.get_modifier('src_vrt', ii) * det_axis_vrt / px[0]  
     
             #Source shift (H):
-            src_vect += geom.find_modifier('src_hrz', ii) * det_axis_hrz
+            src_vect += geom.get_modifier('src_hrz', ii) * det_axis_hrz / px[1]
     
             #Source shift (M):
-            src_vect += geom.find_modifier('det_mag', ii) * det_normal
+            src_vect += geom.get_modifier('src_mag', ii) * det_normal / px[1]
+
+            # Rotation axis shift:
+            det_vect -= geom.get_modifier('axs_hrz', ii) * det_axis_hrz  / px[1]
+            src_vect -= geom.get_modifier('axs_hrz', ii) * det_axis_hrz  / px[1]
     
             # Rotation relative to the detector plane:
             # Compute rotation matrix
         
-            T = transforms3d.axangles.axangle2mat(det_normal, geom.find_modifier('det_rot', ii))
+            T = transforms3d.axangles.axangle2mat(det_normal, geom.get_modifier('det_rot', ii))
             
             det_axis_hrz[:] = numpy.dot(T.T, det_axis_hrz)
-            det_axis_vrt[:] = numpy.dot(T, det_axis_vrt) 
+            det_axis_vrt[:] = numpy.dot(T, det_axis_vrt)
         
             # Global transformation:
             # Rotation matrix based on Euler angles:
-            R = euler.euler2mat(geom.find_modifier('vol_x_rot'), geom.find_modifier('vol_y_rot'), geom.find_modifier('vol_z_rot'), 'syxz')
+            R = euler.euler2mat(geom.get_modifier('vol_x_rot'), geom.get_modifier('vol_y_rot'), geom.get_modifier('vol_z_rot'), 'syxz')
     
             # Apply transformation:
             det_axis_hrz[:] = numpy.dot(R, det_axis_hrz)
-            det_axis_vrt[:] = numpy.dot(R, det_axis_vrt) 
+            det_axis_vrt[:] = numpy.dot(R, det_axis_vrt)
             src_vect[:] = numpy.dot(R, src_vect)
-            det_vect[:] = numpy.dot(R, det_vect)             
+            det_vect[:] = numpy.dot(R, det_vect)            
             
             # Add translation:
-            T = numpy.array([geom.find_modifier('vol_x_tra'), geom.find_modifier('vol_y_tra'), geom.find_modifier('vol_z_tra')])    
-            src_vect[:] += T             
-            det_vect[:] += T 
-        
+            vect_norm = det_axis_vrt[2]
+            
+            T = numpy.array([geom.get_modifier('vol_x_tra') * vect_norm / px[1], geom.get_modifier('vol_y_tra') * vect_norm / px[1], geom.get_modifier('vol_z_tra') * vect_norm / px[0]])    
+            src_vect[:] -= T            
+            det_vect[:] -= T
+
         # Modifiers applied... Extend the volume if needed                    
         return vectors
             
@@ -2292,23 +2640,30 @@ class reconstruct(object):
         sz = self._total_data_shape()
         
         # Calculate the size of the reconstruction volume based on geometry modifier values:
+        # Shifts due to squewed geometry:    
         vrt_shift = 0
         hrz_shift = 0
         
         for proj in self._projections:
-            shift = proj.meta.geometry.origin_shift()
+            shift = numpy.abs(proj.meta.geometry.origin_shift())
             hrz_shift = numpy.max([hrz_shift, shift[0]])
-            vrt_shift = numpy.max([vrt_shift, shift[1]]) 
+            vrt_shift = numpy.max([vrt_shift, shift[1]])  
         
         # Decide on the detector and volume size:
         det_count_x = sz[2]
         det_count_z = sz[0]
     
+        print('Volume crop is:')
+        print(self._vol_crop)
+        
+        print('Horizontal and vertical shift.')
+        print(hrz_shift, vrt_shift)
+        
         # Make volume count x > detector count to include corneres of the object:
-        if force_vol_size == []:    
-            vol_count_x = numpy.int(sz[2] - self._vol_crop[0] + hrz_shift * 2) 
-            vol_count_y = numpy.int(sz[2] - self._vol_crop[1] + hrz_shift * 2) 
-            vol_count_z = numpy.int(sz[0] - self._vol_crop[2] + vrt_shift * 2)
+        if force_vol_size == []:  
+            vol_count_x = numpy.int(sz[2] - self._vol_crop[0] + hrz_shift)
+            vol_count_y = numpy.int(sz[2] - self._vol_crop[1] + hrz_shift)
+            vol_count_z = numpy.int(sz[0] - self._vol_crop[2] + vrt_shift)
         else:
             vol_count_x = numpy.int(force_vol_size[2])
             vol_count_y = numpy.int(force_vol_size[1])
@@ -2325,7 +2680,7 @@ class reconstruct(object):
         minz = -vol_count_z // 2 * img_pixel[1]
         maxz = +vol_count_z // 2 * img_pixel[1]
 
-        self.vol_geom = astra.create_vol_geom(vol_count_x, vol_count_y, vol_count_z, minx, maxx, miny, maxy, minz, maxz)
+        self.vol_geom = astra.create_vol_geom(vol_count_y, vol_count_x, vol_count_z, minx, maxx, miny, maxy, minz, maxz)
         
         total_vectors = numpy.zeros((0,12))
         
@@ -2341,17 +2696,23 @@ class reconstruct(object):
             proj_geom = astra.create_proj_geom('cone', det_pixel[1], det_pixel[0], det_count_z, det_count_x, theta, src2obj, det2obj)
         
             # Convert proj_geom to vectors and apply modifiers:
-            vectors = self._modifiers2vectors(proj_geom, proj.meta.geometry)
+            vectors = self._modifiers2vectors(proj_geom, proj.meta.geometry, det_pixel)
             
             # Extend vectors:
-            total_vectors = numpy.append(total_vectors, vectors, axis=0) 
+            total_vectors = numpy.append(total_vectors, vectors, axis=0)
             
         # Make a new geometry based on the total vector:    
         self.proj_geom = astra.create_proj_geom('cone_vec', det_count_z, det_count_x, total_vectors)    
         
     def _initialize_ramp_filter(self, power = 1):
+        
+      if power < 1:
+          self._projection_filter = None
+          
+          return None
+          
       sz = self._total_data_shape()
-
+      
       # Next power of 2:
       order = numpy.int32(2 ** numpy.ceil(math.log2(sz[2]) - 1))
       n = numpy.arange(0, order)
@@ -2421,7 +2782,13 @@ class reconstruct(object):
     
               sz = self._projection_filter.shape
     
-              slice_proj_geom = astra.create_proj_geom('parallel', 1.0, sz[1], self._total_theta())
+              try:    
+                  slice_proj_geom = astra.create_proj_geom('parallel', 1.0, sz[1], self._total_theta())
+              except:
+                  print('Warning! Mistmatch in projection filter shape. Reinitializing...')
+                  self._initialize_ramp_filter()
+                  sz = self._projection_filter.shape
+                  slice_proj_geom = astra.create_proj_geom('parallel', 1.0, sz[1], self._total_theta())
     
               filt_id = astra.data2d.link('-sino', slice_proj_geom, self._projection_filter)
               cfg['option']['FilterSinogramId'] = filt_id
@@ -2505,43 +2872,67 @@ class reconstruct(object):
 
         return volume(vol)
         # No need to make a history record - sinogram is not changed.
-
-
-    def SIRT_CPU(self, iterations = 10, min_constraint = 0, relative_constraint = None, force_vol_size = []):
+        
+    def dry_run(self, force_vol_size = []):
+        '''
+        Create an empty reconstruction volume.
+        '''
+        # Initialize ASTRA:
+        self._initialize_astra(force_vol_size)
+        
+        # Initialize volume:      
+        vol = numpy.ones(astra.functions.geom_size(self.vol_geom), dtype=numpy.float32)
+        vol_obj = volume(vol)
+        
+        print('Empty volume created.')
+        
+        return vol_obj
+        
+    def SIRT_CPU(self, iterations = 10, min_constraint = 0, relative_constraint = None, force_vol_size = [], vol_obj = None):
         '''
 
         '''
         # Initialize ASTRA:
         self._initialize_astra(force_vol_size)
+        
+        data = self._total_data()
 
         # Create a volume containing only ones for forward projection weights
         sz = self._total_data_shape()
         
         # Initialize weights:
-        vol_ones = numpy.ones(astra.functions.geom_size(self.vol_geom), dtype=numpy.float32)
-        vol = numpy.zeros_like(vol_ones, dtype=numpy.float32)
+        #vol_ones = numpy.ones(astra.functions.geom_size(self.vol_geom), dtype=numpy.float32)
+        #vol = numpy.zeros_like(vol_ones, dtype=numpy.float32)
         
-        vol_obj = volume(vol)
+        #vol_obj = volume(vol)
         
-        weights = self._forwardproject(vol_ones)
-        weights = 1.0 / (weights + (weights == 0))
+        #weights = self._forwardproject(vol_ones)
+        weights = self._backproject(numpy.ones_like(data), algorithm='BP3D_CUDA')
+        
+        eps = weights.max()/100
+        weights[weights < eps] = eps
 
-        bwd_weights = 1.0 / sz[1]
+        #bwd_weights = 1.0 / sz[1]
 
-        vol = numpy.zeros(astra.functions.geom_size(self.vol_geom), dtype=numpy.float32)
+        if vol_obj is None:  
+            vol = numpy.zeros(astra.functions.geom_size(self.vol_geom), dtype=numpy.float32)
+            vol_obj = volume(vol)
+        else:
+            vol = vol_obj.data._data
 
         for ii_iter in range(iterations):
             
-            print('SIRT_CPU. Iteration %01d' % ii_iter)
-            
             fwd_proj_vols = self._forwardproject(vol)
 
-            residual = (self._total_data() - fwd_proj_vols) * weights
+            residual = (data - fwd_proj_vols)
 
             if not self._projection_mask is None:
                 residual *= self._projection_mask
             
-            vol += bwd_weights * self._backproject(residual, algorithm='BP3D_CUDA')
+            vol += self._backproject(residual, algorithm='BP3D_CUDA') / weights #* bwd_weights
+            
+            if not self._reconstruction_mask is None:
+                vol = self._reconstruction_mask * vol
             
             # If relative_constraint is used, force values below relative threshold to 0:
             if relative_constraint != None:
@@ -2552,12 +2943,17 @@ class reconstruct(object):
             if min_constraint != None:
                 vol[vol < min_constraint] = min_constraint
 
-        vol_obj.data._data = vol    
-
+            vol_obj.data._data = vol    
+            
+            print('SIRT_CPU. Iteration %01d' % ii_iter)
+            print('Maximum value is:', vol.max())
+            
+            vol_obj.display.slice(fig_num= 11)
+            
         return vol_obj
         # No need to make a history record - sinogram is not changed.
         
-    def EM_CPU(self, iterations = 10, force_vol_size = []):
+    def EM_CPU(self, iterations = 10, force_vol_size = [], vol_obj = None):
         '''
         Expectation Maximization based of ASTRA projectors, however, reconstruction and input data are keept in the CPU memory.
         '''
@@ -2567,7 +2963,7 @@ class reconstruct(object):
         # Create a volume containing only ones for forward projection weights
         #sz = self._total_data_shape()
         
-        data = self._total_data() 
+        data = self._total_data()
         
         print('EM_CPU. Computing weights.')
         
@@ -2575,36 +2971,70 @@ class reconstruct(object):
         weights = self._backproject(numpy.ones_like(data), algorithm='BP3D_CUDA')
         reg = weights.max() / 100
         weights[weights < reg] = reg
-        
-        # Regularization epsilon for the forward projection:
-        eps = data[:,0,:].max() / 100
 
-        # Initializae volume:
-        vol = numpy.ones(astra.functions.geom_size(self.vol_geom), dtype=numpy.float32)
-        vol_obj = volume(vol)
+        # Regularization epsilon for the forward projection:
+        max_data = abs(data[:,0,:].max())          
+        eps = max_data / 100
         
+        # Initializae volume:
+        if vol_obj is None:  
+            vol = numpy.ones(astra.functions.geom_size(self.vol_geom), dtype=numpy.float32)
+            vol_obj = volume(vol)
+        else:
+            vol = vol_obj.data._data
+            
+            # Impose non-negativity on the initial guess:
+            vol[vol < 0] = 0  
+        
+        if not self._reconstruction_mask is None:
+            vol = self._reconstruction_mask * vol
+            
+        print('Starting iterations')
+    
         for ii_iter in range(0, iterations):
-            
-            print('EM_CPU. Iteration %01d' % ii_iter)
-            
+                        
             forward = self._forwardproject(vol)
             forward[forward < eps] = eps
-
-            #plt.figure()
-            #plt.imshow(data[200,:,:], cmap='gray')
-
-            #plt.figure()
-            #plt.imshow(forward[200,:,:], cmap='gray')
-        
-            vol *= self._backproject(data / forward, algorithm='BP3D_CUDA') / weights
-
-            #plt.figure()
-            #plt.imshow(vol[200,:,:], cmap='gray')
+            
+            forward = data / forward
             
             if not self._projection_mask is None:
-                vol *= self._projection_mask
+                forward *= self._projection_mask
+
+            # TODO:                
+            #_tile_fringe = 0
+            #_poisson_on_fly = False                
+            
+            # Add fringe:
+            if self._tile_fringe > 0:
+                fr = self._tile_fringe
+                fringe_l = numpy.linspace(0, 1, fr)
+                fringe_r = numpy.linspace(1, 0, fr)
                 
-        vol_obj.data._data = vol    
+                forward[:fr, :, :] *= fringe_l[:, None, None]
+                forward[-fr:, :, :] *= fringe_r[:, None, None]
+                forward[:, :, :fr] *= fringe_l[None, None, :]
+                forward[:, :, -fr:] *= fringe_r[None, None, :]
+
+                forward[:fr, :, :] += fringe_r[:, None, None]
+                forward[-fr:, :, :] += fringe_l[:, None, None]
+                forward[:, :, :fr] += fringe_r[None, None, :]
+                forward[:, :, -fr:] += fringe_l[None, None, :]
+            
+            vol *= self._backproject(forward, algorithm='BP3D_CUDA') / weights
+            
+            # Make sure nothing explodes:
+            vol[abs(vol) > max_data] = 0  
+            vol_obj.data._data = vol
+
+            print('EM_CPU. Iteration %01d' % ii_iter)
+            print('Maximum value is:', vol.max())
+            
+            vol_obj.display.slice(fig_num= 11)
+            vol_obj.display.slice(dim_num = 1, fig_num= 12)
+            
+            #plt.figure()
+            #plt.imshow(vol[200,:,:], cmap='gray')              
 
         return vol_obj
 
@@ -2659,7 +3089,7 @@ class reconstruct(object):
         vol = self._backproject(self._total_data(), algorithm = 'CGLS3D_CUDA', iterations = iterations, min_constraint=min_constraint)
 
         return volume(vol)
-        # No need to make a history record - sinogram is not changed.   
+        # No need to make a history record - sinogram is not changed.  
         
         
     def project_thetas(self, parameter_value = 0, parameter = 'axis_offset'):
@@ -2689,7 +3119,7 @@ class reconstruct(object):
         self._initialize_astra()
 
         # Run the reconstruction:
-        epsilon = self._parse_unit('deg') # 1 degree
+        epsilon = self._parse_unit('[deg]') # 1 degree
         short_scan = numpy.abs(theta[-1] - 2*numpy.pi) > epsilon
         vol = self._backproject(prnt.data.data, algorithm='FDK_CUDA', short_scan=short_scan)
 
@@ -2769,10 +3199,10 @@ class postprocess(subclass):
         '''
         volume = self._parent
         
-        if threshold is None: 
+        if threshold is None:
             #threshold = volume.analyse.max() / 2
             threshold = (numpy.percentile(volume.data.data, 98)+numpy.percentile(volume.data.data, 90) ) / 2
-        elif relative: 
+        elif relative:
             threshold = (numpy.percentile(volume.data.data, 98)+numpy.percentile(volume.data.data, 90)) * threshold
         
         if binary:
@@ -2891,7 +3321,7 @@ class postprocess(subclass):
                     # Add a hole to the total map:
                     int_seed_mask = int_seed_mask & ((xx - coords[0])**2 + (yy - coords[1])**2 > spike_support ** 2)            
                     blocked_dist *= int_seed_mask
-                   
+                  
             # Next slice will be supported by areas of the current one plus some distance:    
             support_slice = ndimage.binary_dilation(obj_slice)
             
@@ -2908,7 +3338,7 @@ class postprocess(subclass):
       
     def printer_support_grow(self, seeds_external, seeds_internal = None, radius_body = 12, radius_head = 4, radius_internal = 10):
         '''
-        Grow internal and external support structures from seeds. Internal supports will be constant width, 
+        Grow internal and external support structures from seeds. Internal supports will be constant width,
         while the external ones will have small heads, thicker bodies, and yet thicker feet.
         '''
         
@@ -2961,7 +3391,7 @@ class postprocess(subclass):
             # Make new seeds grow:
             if seeds_external[:,:,-ii].max():      
                 # Top phase:
-                seeds_external[:,:,-ii] = ndimage.binary_dilation(seeds_external[:,:,-ii], iterations = radius_head)   
+                seeds_external[:,:,-ii] = ndimage.binary_dilation(seeds_external[:,:,-ii], iterations = radius_head)  
                 
         print('External spikes grow width')        
 
@@ -2976,10 +3406,10 @@ class postprocess(subclass):
             # Stop growing thick spikes:
             projection *= (projection < radius_body)
             
-            seeds_external[:,:,-ii] = seeds_external[:,:,-ii] | (ndimage.grey_dilation(projection + (projection > 0), 
+            seeds_external[:,:,-ii] = seeds_external[:,:,-ii] | (ndimage.grey_dilation(projection + (projection > 0),
                                                                                          size = (3,3)))  
             
-            projection = seeds_external[:,:,-ii]       
+            projection = seeds_external[:,:,-ii]      
 
         print('External spikes constant width')        
 
@@ -3012,7 +3442,7 @@ class postprocess(subclass):
         projection = obj_vol.max(2) > 0
         
         for ii in range(obj_vol.shape[2]-1-base_space, obj_vol.shape[2]+1):            
-            obj_vol[:,:,-ii] = obj_vol[:,:,-ii] | projection 
+            obj_vol[:,:,-ii] = obj_vol[:,:,-ii] | projection
 
         self._parent.data.data = obj_vol
         
@@ -3040,7 +3470,7 @@ class postprocess(subclass):
         return log_base
     
     def _logpolar2d(self, image, pcorr_shape, log_base):
-               
+              
         imshape = image.shape
         
         center = imshape[0] / 2.0, imshape[1] / 2.0
@@ -3060,7 +3490,7 @@ class postprocess(subclass):
         output = numpy.empty_like(y)
         
         # map_coordinates cannot handle complex numbers
-        if image.dtype == numpy.complex: 
+        if image.dtype == numpy.complex:
             image = abs(image)
         
         # Transform to a new coordinate system
@@ -3081,7 +3511,7 @@ class postprocess(subclass):
         amax = numpy.argmax(im0)
         vec = list(numpy.unravel_index(amax, im0.shape))
         
-        # _compensate_fftshift is not appropriate here, this is OK.   
+        # _compensate_fftshift is not appropriate here, this is OK.  
         vec -= numpy.array(im0.shape, int) // 2
         
         return vec
@@ -3090,7 +3520,7 @@ class postprocess(subclass):
         '''
         Calculate a subpixel shift using derivative method.
         Pixels belonging to the 'margin' are discarded. Use margin if the image was shifted or infilled with zeros, for instance.
-        '''   
+        '''  
         # Apply margins:
         im0 = im0[margin[0]:, margin[1]:]
         im1 = im1[margin[0]:, margin[1]:]
@@ -3114,8 +3544,8 @@ class postprocess(subclass):
         a_im_dx = numpy.abs(im_dx)
         a_im_dy = numpy.abs(im_dy)
         
-        # Compute shifts down to 0.1 pixel.           
-        im_dx = (im0[1:-1,:]) / im_dx   
+        # Compute shifts down to 0.1 pixel.          
+        im_dx = (im0[1:-1,:]) / im_dx  
         im_dx = numpy.mean(im_dx[a_im_dx > a_im_dx.max() / 5])
         im_dx = numpy.round(im_dx, decimals=2)
         
@@ -3123,13 +3553,13 @@ class postprocess(subclass):
         im_dy = numpy.mean(im_dy[a_im_dy > a_im_dy.max() / 5])
         im_dy = numpy.round(im_dy, decimals=2)
         
-        if (numpy.abs(im_dx) > 1) | (numpy.abs(im_dy) > 1): 
+        if (numpy.abs(im_dx) > 1) | (numpy.abs(im_dy) > 1):
             self._parent.warning('Residual derivative should be smaller than 1 in _subpixel_shift(). Subpixel shift won`t be applied.')
             
             return [0, 0]
         
-        return [im_dx, im_dy] 
-   
+        return [im_dx, im_dy]
+  
     def _get_rot_scale(self, im0, im1):
         """
         Given two images, return their scale and angle difference.
@@ -3143,7 +3573,7 @@ class postprocess(subclass):
         log_base = self._get_log_base(shape, pcorr_shape[1])
         
         # Transform to logpolar:
-        im0 = self._logpolar2d(im0, pcorr_shape, log_base) 
+        im0 = self._logpolar2d(im0, pcorr_shape, log_base)
         im1 = self._logpolar2d(im1, pcorr_shape, log_base)
         
         # Compute DFTs:
@@ -3163,7 +3593,7 @@ class postprocess(subclass):
         
         # Apply corrections and refine the estimate in real space:
         im1 = interp.shift(im1, [theta, rad])
-               
+              
         # Only if theta and rad are small, it makes sense to compute subpixel shift.
         # Currently it will actually fail when margin is too large.
         if (abs(theta)+abs(rad)) < 10:
@@ -3247,7 +3677,7 @@ class postprocess(subclass):
         # Volumes to align:
         im1 = prnt.data._data
         im0 = master_volume.data._data
-               
+              
         shape = im0.shape
     
         if shape != im1.shape:
@@ -3288,7 +3718,7 @@ class postprocess(subclass):
             # Show progress:
             self._progress_registration(im0_proj, im1_proj, ii)
                 
-            # All rotations are updated at once at the moment. 
+            # All rotations are updated at once at the moment.
             # For now we will discard the calculated scale.
             
             # Let's average estimated shifts and angles and use them to update the volume:
@@ -3330,6 +3760,17 @@ class volume(object):
 
         # Get the data in:
         self.data._data = vol
+        
+    def __del__(self):
+        '''
+        Suicide function.
+        '''
+        self.data = None      
+        self.meta = None
+        
+        gc.collect()
+        
+        print('Volume object deleted.')
         
     def copy(self):
         '''
@@ -3373,7 +3814,7 @@ class volume(object):
 #           SINOGRAM class
 # **************************************************************
 import warnings
-import logging
+#import logging
 import copy
 
 _min_history = ['io.read_raw', 'io.read_ref', 'io.read_meta', 'process.flat_field', 'process.log']
@@ -3431,6 +3872,20 @@ class projections(object):
         self.optimize = optimize(self)
         self.reconstruct = reconstruct(self)
         self.data = data(self)
+        
+    def __del__(self):
+        '''
+        Suicide function.
+        '''
+        self.data = None
+        self.reconstruct = None
+        
+        self.meta = None
+        gc.collect()
+        
+        print('Projections object deleted.')
+        
+        
         
     def message(self, msg):
         '''

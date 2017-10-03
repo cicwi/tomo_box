@@ -28,6 +28,10 @@ class spectra():
         '''
         Total X-ray absorption for a given compound in cm2g. Energy is given in KeV
         '''
+        
+        # xraylib might complain about types:
+        energy = numpy.double(energy)
+        
         if numpy.size(energy) == 1:
             return xraylib.CS_Total_CP(compound, energy)   
         else:
@@ -37,6 +41,9 @@ class spectra():
         '''
         Total X-ray absorption for a given compound in cm2g. Energy is given in KeV
         '''
+        # xraylib might complain about types:
+        energy = numpy.double(energy)        
+        
         return thickness * rho * spectra.mass_attenuation(energy, compound)
         
     @staticmethod    
@@ -44,6 +51,10 @@ class spectra():
         '''
         Compton scaterring crossection for a given compound in cm2g. Energy is given in KeV
         '''
+        
+        # xraylib might complain about types:
+        energy = numpy.double(energy)
+        
         if numpy.size(energy) == 1:
             return xraylib.CS_Compt_CP(compound, energy)   
         else:
@@ -54,6 +65,10 @@ class spectra():
         '''
         Compton scaterring crossection for a given compound in cm2g. Energy is given in KeV
         '''
+        
+        # xraylib might complain about types:
+        energy = numpy.double(energy)
+        
         if numpy.size(energy) == 1:
             return xraylib.CS_Rayl_CP(compound, energy)   
         else:
@@ -64,6 +79,10 @@ class spectra():
         '''
         Photoelectric effect for a given compound in cm2g. Energy is given in KeV
         '''
+        
+        # xraylib might complain about types:
+        energy = numpy.double(energy)
+        
         if numpy.size(energy) == 1:
             return xraylib.CS_Photo_CP(compound, energy)   
         else:
@@ -143,7 +162,7 @@ class spectra():
         # Projected length and intensity (only central slices):
         length = synth_proj.data._data[window//2:-window//2,:,:]
         intensity = trim_proj.data._data[window//2:-window//2,:,:]
-        
+        '''
         plt.figure()
         plt.imshow(intensity[:,1,:])
         plt.colorbar()
@@ -173,7 +192,7 @@ class spectra():
         plt.imshow(length[:,300,:])
         plt.colorbar()
         plt.title('length')
-
+        '''
         length = length.ravel()
         intensity = intensity.ravel()
         
